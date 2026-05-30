@@ -1,0 +1,2 @@
+"""Stable Money domain layer."""
+

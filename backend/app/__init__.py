@@ -1,0 +1,2 @@
+"""Stable Money Python backend."""
+

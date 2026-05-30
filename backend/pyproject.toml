@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stable-money-rumik-backend"
+version = "0.1.0"
+description = "Python backend and Pipecat voice pipeline for the Stable Money Rumik demo."
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "asyncpg>=0.30",
+  "fastapi>=0.115",
+  "httpx>=0.28",
+  "python-dotenv>=1.0",
+  "python-multipart>=0.0.20",
+  "uvicorn[standard]>=0.34",
+  "websockets>=14",
+  "pipecat-ai[openai,silero,webrtc]>=1.0,<2",
+  "pipecat-ai-small-webrtc-prebuilt>=0.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+

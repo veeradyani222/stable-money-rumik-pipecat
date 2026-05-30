@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+
+# testing
+coverage/
+
+# local worktrees
+/.worktrees/
+
+# next.js
+.next/
+out/
+
+# production
+build/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+
+# env files
+.env
+.env*.local
+
+# python
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# vercel
+.vercel
