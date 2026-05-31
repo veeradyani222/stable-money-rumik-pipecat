@@ -1,4 +1,4 @@
-FROM dailyco/pipecat-base:0.1.0-py3.14
+FROM dailyco/pipecat-base:latest-py3.12
 
 ENV PYTHONUNBUFFERED=1
 ENV PCC_LOG_FEATURES_SUMMARY=true
