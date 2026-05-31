@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -76,12 +77,23 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
         raise RuntimeError("OPENAI_API_KEY is required to run the Pipecat voice agent.")
 
     from pipecat.frames.frames import TTSSpeakFrame
+    from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+    from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
+    from pipecat.observers.startup_timing_observer import StartupTimingObserver
+    from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.worker import PipelineParams, PipelineWorker
     from pipecat.processors.aggregators.llm_context import LLMContext
-    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
     from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
     from pipecat.services.openai.stt import OpenAIRealtimeSTTService
+    from pipecat.turns.user_mute import FunctionCallUserMuteStrategy, MuteUntilFirstBotCompleteUserMuteStrategy
+    from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
+    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.transports.base_transport import TransportParams
     from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
     from pipecat.workers.runner import WorkerRunner
@@ -92,7 +104,7 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
     )
     stt = OpenAIRealtimeSTTService(
         api_key=settings.openai_api_key,
-        turn_detection=None,
+        turn_detection=False,
         settings=OpenAIRealtimeSTTService.Settings(
             model=settings.openai_realtime_transcribe_model,
             language=None,
@@ -101,7 +113,23 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
         ),
     )
     llm_context = LLMContext(messages=[], tools=build_pipecat_tools_schema([]))
-    context_aggregators = LLMContextAggregatorPair(llm_context, add_tool_change_messages=False)
+    smart_turn_params = SmartTurnParams(stop_secs=0.8, max_duration_secs=5)
+    user_params = LLMUserAggregatorParams(
+        vad_analyzer=SileroVADAnalyzer(params=VADParams()),
+        user_turn_strategies=UserTurnStrategies(
+            start=[VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()],
+            stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3(params=smart_turn_params))],
+        ),
+        user_mute_strategies=[
+            MuteUntilFirstBotCompleteUserMuteStrategy(),
+            FunctionCallUserMuteStrategy(),
+        ],
+    )
+    context_aggregators = LLMContextAggregatorPair(
+        llm_context,
+        user_params=user_params,
+        add_tool_change_messages=False,
+    )
     user_aggregator = context_aggregators.user()
     assistant_aggregator = context_aggregators.assistant()
     llm = OpenAIResponsesLLMService(
@@ -120,6 +148,7 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
     )
     llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
+    rumik_preconnect_task = asyncio.create_task(tts.preconnect())
     pipeline = Pipeline(
         [
             transport.input(),
@@ -133,10 +162,59 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
             transport.output(),
         ]
     )
+    metrics_observer = MetricsLogObserver()
+    latency_observer = UserBotLatencyObserver()
+    startup_observer = StartupTimingObserver()
     worker = PipelineWorker(
         pipeline,
+        observers=[metrics_observer, latency_observer, startup_observer],
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
     )
+
+    @latency_observer.event_handler("on_latency_measured")
+    async def on_latency_measured(_observer, latency_seconds):
+        _log_voice_event(
+            "voice_latency_measured",
+            session_id=context.session_id,
+            call_id=context.call_id,
+            latency_seconds=latency_seconds,
+        )
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(_observer, breakdown):
+        _log_voice_event(
+            "voice_latency_breakdown",
+            session_id=context.session_id,
+            call_id=context.call_id,
+            breakdown=breakdown,
+        )
+
+    @latency_observer.event_handler("on_first_bot_speech_latency")
+    async def on_first_bot_speech_latency(_observer, latency_seconds):
+        _log_voice_event(
+            "voice_first_bot_speech_latency",
+            session_id=context.session_id,
+            call_id=context.call_id,
+            latency_seconds=latency_seconds,
+        )
+
+    @startup_observer.event_handler("on_startup_timing_report")
+    async def on_startup_timing_report(_observer, report):
+        _log_voice_event(
+            "voice_startup_timing_report",
+            session_id=context.session_id,
+            call_id=context.call_id,
+            report=report,
+        )
+
+    @startup_observer.event_handler("on_transport_timing_report")
+    async def on_transport_timing_report(_observer, report):
+        _log_voice_event(
+            "voice_transport_timing_report",
+            session_id=context.session_id,
+            call_id=context.call_id,
+            report=report,
+        )
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(_aggregator, _strategy, message):
@@ -181,4 +259,5 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
+    await rumik_preconnect_task
     await runner.run()

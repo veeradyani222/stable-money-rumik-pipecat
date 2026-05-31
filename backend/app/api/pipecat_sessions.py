@@ -78,17 +78,5 @@ async def ice_candidate(request: SmallWebRTCPatchRequest):
     return {"status": "success"}
 
 
-@router.post("/api/voice/pipecat-session")
-async def pipecat_session(body: dict):
-    return {
-        "ok": True,
-        "transport": "smallwebrtc",
-        "offer_url": "/api/offer",
-        "turn_config_url": "/turn-config",
-        "session_id": body.get("session_id"),
-        "call_id": body.get("call_id"),
-    }
-
-
 async def close_small_webrtc_handler() -> None:
     await small_webrtc_handler.close()

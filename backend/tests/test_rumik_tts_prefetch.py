@@ -72,6 +72,32 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
         self.adapter.create_session.assert_awaited_once_with("init")
         connect.assert_awaited_once_with("wss://rumik.test/ws?token=token")
 
+    async def test_preconnect_opens_socket_without_sending_speech(self) -> None:
+        self.service._websocket = None
+        self.service._call_event_handler = AsyncMock()
+        self.service._receive_task_handler = AsyncMock()
+        self.adapter.create_session = AsyncMock(return_value={"ws_url": "wss://rumik.test/ws", "token": "token"})
+        socket = FakeWebSocket()
+
+        with patch("app.pipecat_pipeline.rumik_tts.websockets_connect", AsyncMock(return_value=socket)) as connect:
+            await self.service.preconnect()
+
+        self.assertIs(self.service._websocket, socket)
+        self.assertEqual([], socket.sent)
+        self.adapter.create_session.assert_awaited_once_with("init")
+        connect.assert_awaited_once_with("wss://rumik.test/ws?token=token")
+
+    async def test_preconnect_does_not_create_pipecat_managed_tasks_before_start(self) -> None:
+        self.service._websocket = None
+        self.service._call_event_handler = AsyncMock()
+        self.service.create_task = Mock(side_effect=AssertionError("TaskManager should not be used during preconnect"))
+        self.adapter.create_session = AsyncMock(return_value={"ws_url": "wss://rumik.test/ws", "token": "token"})
+
+        with patch("app.pipecat_pipeline.rumik_tts.websockets_connect", AsyncMock(return_value=FakeWebSocket())):
+            await self.service.preconnect()
+
+        self.service.create_task.assert_not_called()
+
     async def test_sentence_requests_reuse_socket_and_send_in_order(self) -> None:
         await exhaust(self.service.run_tts("Pehla sentence.", "turn-1"))
         await exhaust(self.service.run_tts("Doosra sentence.", "turn-1"))
@@ -184,12 +210,11 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PipecatRumikWiringTests(unittest.TestCase):
-    def test_bot_uses_persistent_service_without_parallel_opening_prefetch(self) -> None:
+    def test_bot_uses_persistent_service_with_parallel_rumik_preconnect(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 
-        self.assertNotIn("tts.prewarm(", source)
-        self.assertNotIn("tts.cancel_prewarm()", source)
-        self.assertNotIn("opening_prewarm_task", source)
+        self.assertIn("rumik_preconnect_task = asyncio.create_task(tts.preconnect())", source)
+        self.assertIn("await rumik_preconnect_task", source)
 
 
 if __name__ == "__main__":

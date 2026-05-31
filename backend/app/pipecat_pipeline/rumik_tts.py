@@ -81,6 +81,11 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         def can_generate_metrics(self) -> bool:
             return True
 
+        async def preconnect(self) -> None:
+            if self._websocket and self._websocket.state is State.OPEN:
+                return
+            await self._connect_websocket()
+
         async def start(self, frame: StartFrame):
             await super().start(frame)
             await self._connect()

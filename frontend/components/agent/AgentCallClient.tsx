@@ -116,6 +116,7 @@ export function AgentCallClient() {
   const callStartedAtRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const remoteAudioContextRef = useRef<AudioContext | null>(null);
+  const remoteAudioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const remoteAudioFrameRef = useRef<number | null>(null);
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const callStateRef = useRef<CallState>('idle');
@@ -177,6 +178,7 @@ export function AgentCallClient() {
     }
     void remoteAudioContextRef.current?.close().catch(() => {});
     remoteAudioContextRef.current = null;
+    remoteAudioSourceRef.current = null;
   }, []);
 
   const endCall = useCallback(() => {
@@ -267,12 +269,13 @@ export function AgentCallClient() {
       const context = new AudioContext();
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
-      const data = new Uint8Array(analyser.fftSize);
       let activeFrames = 0;
 
       analyser.fftSize = 1024;
+      const data = new Uint8Array(analyser.fftSize);
       source.connect(analyser);
       remoteAudioContextRef.current = context;
+      remoteAudioSourceRef.current = source;
       logVoiceTimingEvent('remote_audio:voice_monitor_started', {
         threshold: RUMIK_VOICE_START_THRESHOLD,
         requiredFrames: RUMIK_VOICE_START_FRAMES,
@@ -355,6 +358,7 @@ export function AgentCallClient() {
       onRemoteAudioStarted: () => {
         if (pipelineClientRef.current !== client) return;
         logVoiceTimingEvent('pipeline:remote_audio:element_started');
+        stopConnectingRingtone('remote_audio_playback_started');
       },
       onDiagnostic: (event, detail) => {
         if (pipelineClientRef.current !== client) return;
