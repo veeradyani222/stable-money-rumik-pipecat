@@ -12,10 +12,13 @@ import { API_FETCH_OPTIONS, apiUrl } from '@/lib/api-base';
 import { VoicePipelineClient } from '@/lib/voice/pipeline-client';
 
 type CallState = 'idle' | 'connecting' | 'connected' | 'error';
+type AgentConversationPhase = 'user' | 'thinking' | 'agent';
 
 const CONNECTING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
 const RUMIK_VOICE_START_THRESHOLD = 8;
 const RUMIK_VOICE_START_FRAMES = 3;
+const USER_VOICE_START_THRESHOLD = 8;
+const USER_VOICE_SILENCE_FRAMES = 18;
 
 type VoiceTimingDetail = Record<string, string | number | boolean | null | undefined>;
 
@@ -108,6 +111,7 @@ export function AgentCallClient() {
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [agentPhase, setAgentPhase] = useState<AgentConversationPhase>('user');
   const [ringtoneActive, setRingtoneActive] = useState(false);
   const [personaDataOpen, setPersonaDataOpen] = useState(false);
   const [voiceAnalyser, setVoiceAnalyser] = useState<AnalyserNode | null>(null);
@@ -120,10 +124,17 @@ export function AgentCallClient() {
   const remoteAudioFrameRef = useRef<number | null>(null);
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const callStateRef = useRef<CallState>('idle');
+  const agentPhaseRef = useRef<AgentConversationPhase>('user');
 
   const setNextCallState = useCallback((state: CallState) => {
     callStateRef.current = state;
     setCallState(state);
+  }, []);
+
+  const setNextAgentPhase = useCallback((phase: AgentConversationPhase) => {
+    if (agentPhaseRef.current === phase) return;
+    agentPhaseRef.current = phase;
+    setAgentPhase(phase);
   }, []);
 
   const playConnectingRingtone = useCallback(() => {
@@ -191,9 +202,10 @@ export function AgentCallClient() {
     callStartedAtRef.current = null;
     setVoiceAnalyser(null);
     setIsListening(false);
+    setNextAgentPhase('user');
     setDuration(0);
     setNextCallState('idle');
-  }, [setNextCallState, stopConnectingRingtone, stopRemoteAudioMonitor]);
+  }, [setNextAgentPhase, setNextCallState, stopConnectingRingtone, stopRemoteAudioMonitor]);
 
   useEffect(() => {
     const nextSessionId = searchParams.get('session_id') || searchParams.get('sessionId') || '';
@@ -261,6 +273,45 @@ export function AgentCallClient() {
     await context.resume();
   }, []);
 
+  useEffect(() => {
+    if (callState !== 'connected' || !voiceAnalyser) return;
+
+    const data = new Uint8Array(voiceAnalyser.fftSize);
+    let frameId: number | null = null;
+    let heardUserSpeech = false;
+    let silentFrames = 0;
+
+    const sample = () => {
+      if (callStateRef.current !== 'connected') return;
+
+      voiceAnalyser.getByteTimeDomainData(data);
+      let peak = 0;
+      for (const value of data) {
+        peak = Math.max(peak, Math.abs(value - 128));
+      }
+
+      if (peak >= USER_VOICE_START_THRESHOLD) {
+        heardUserSpeech = true;
+        silentFrames = 0;
+        setNextAgentPhase('user');
+      } else if (heardUserSpeech && agentPhaseRef.current === 'user') {
+        silentFrames += 1;
+        if (silentFrames >= USER_VOICE_SILENCE_FRAMES) {
+          heardUserSpeech = false;
+          setAgentPhase('thinking');
+          agentPhaseRef.current = 'thinking';
+        }
+      }
+
+      frameId = window.requestAnimationFrame(sample);
+    };
+
+    frameId = window.requestAnimationFrame(sample);
+    return () => {
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [callState, setNextAgentPhase, voiceAnalyser]);
+
   const monitorRemoteStreamForRumikVoice = useCallback(async (stream: MediaStream) => {
     if (typeof window === 'undefined') return;
 
@@ -270,6 +321,7 @@ export function AgentCallClient() {
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
       let activeFrames = 0;
+      let hasDetectedSpeech = false;
 
       analyser.fftSize = 1024;
       const data = new Uint8Array(analyser.fftSize);
@@ -293,10 +345,13 @@ export function AgentCallClient() {
 
         activeFrames = peak >= RUMIK_VOICE_START_THRESHOLD ? activeFrames + 1 : 0;
         if (activeFrames >= RUMIK_VOICE_START_FRAMES) {
-          logVoiceTimingEvent('remote_audio:voice_detected', { peak, activeFrames });
-          stopRemoteAudioMonitor();
-          stopConnectingRingtone('rumik_voice_started');
-          return;
+          if (!hasDetectedSpeech) {
+            logVoiceTimingEvent('remote_audio:voice_detected', { peak, activeFrames });
+            stopConnectingRingtone('rumik_voice_started');
+          }
+          hasDetectedSpeech = true;
+          setAgentPhase('agent');
+          agentPhaseRef.current = 'agent';
         }
 
         remoteAudioFrameRef.current = window.requestAnimationFrame(sample);
@@ -330,16 +385,19 @@ export function AgentCallClient() {
         if (state === 'connected') {
           callStartedAtRef.current = Date.now();
           setIsListening(true);
+          setNextAgentPhase('user');
           setNextCallState('connected');
         }
         if (state === 'closed' && callStateRef.current !== 'idle') {
           setIsListening(false);
           stopConnectingRingtone('pipeline_closed');
+          setNextAgentPhase('user');
           setNextCallState('idle');
         }
         if (state === 'error') {
           setIsListening(false);
           stopConnectingRingtone('pipeline_error');
+          setNextAgentPhase('user');
           setNextCallState('error');
         }
       },
@@ -388,6 +446,7 @@ export function AgentCallClient() {
     playConnectingRingtone,
     session,
     sessionId,
+    setNextAgentPhase,
     setNextCallState,
     stopConnectingRingtone,
   ]);
@@ -413,9 +472,12 @@ export function AgentCallClient() {
   }, [endCall, hasEnteredCall, router]);
 
   const visualizerSpeaker = useMemo<AgentVisualizerSpeaker>(() => {
+    if (callState === 'connected' && agentPhase === 'agent') return 'agent';
     if (callState === 'connected' && isListening) return 'user';
     return 'neutral';
-  }, [callState, isListening]);
+  }, [agentPhase, callState, isListening]);
+  const visualizerAnalyser = callState === 'connected' && agentPhase !== 'agent' ? voiceAnalyser : null;
+  const voiceOrbState = callState === 'connected' ? agentPhase : callState;
 
   if (sessionError) {
     return (
@@ -536,7 +598,7 @@ export function AgentCallClient() {
         </header>
 
         <div className="voice-call-stack">
-          <div className={`voice-orb voice-orb--${callState}`} aria-label="Stable Money Support call">
+          <div className={`voice-orb voice-orb--${voiceOrbState}`} aria-label="Stable Money Support call">
             <div className="voice-orb__inner">
               <span className="voice-orb__caller">Stable Money Support</span>
             </div>
@@ -552,7 +614,7 @@ export function AgentCallClient() {
             <AgentAudioVisualizerBar
               size="lg"
               speaker={visualizerSpeaker}
-              analyser={callState === 'connected' ? voiceAnalyser : null}
+              analyser={visualizerAnalyser}
             />
           </div>
 

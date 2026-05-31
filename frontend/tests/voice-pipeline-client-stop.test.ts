@@ -12,9 +12,10 @@ test('voice pipeline client stops in-flight connection setup before it can recon
   assert.match(pipelineSource, /private stopped = false;/);
   assert.match(pipelineSource, /private ensureActive\(\): void/);
   assert.match(pipelineSource, /if \(this\.stopped\) throw new Error\('Voice pipeline stopped'\);/);
-  assert.match(pipelineSource, /const turnConfigPromise = fetch\(apiUrl\('\/turn-config'\)/);
+  assert.match(pipelineSource, /private async loadLocalIceServers\(\): Promise<RTCIceServer\[]>/);
+  assert.match(pipelineSource, /fetch\(apiUrl\('\/turn-config'\), API_FETCH_OPTIONS\)/);
   assert.match(pipelineSource, /const localStreamPromise = navigator\.mediaDevices\.getUserMedia/);
-  assert.match(pipelineSource, /await Promise\.all\(\[turnConfigPromise, localStreamPromise\]\)/);
+  assert.match(pipelineSource, /await Promise\.all\(\[cloudSessionPromise, localStreamPromise\]\)/);
   assert.doesNotMatch(pipelineSource, /waitForIceGathering/);
   assert.doesNotMatch(pipelineSource, /1800/);
   assert.match(pipelineSource, /if \(this\.stopped\) return;/);
@@ -24,6 +25,7 @@ test('voice pipeline client stops in-flight connection setup before it can recon
 test('voice pipeline client trickles queued ICE candidates after offer returns pc id', () => {
   assert.match(pipelineSource, /private pcId: string \| null = null;/);
   assert.match(pipelineSource, /private pendingIceCandidates: RTCIceCandidateInit\[\] = \[\];/);
+  assert.match(pipelineSource, /private patchOfferUrl = apiUrl\('\/offer'\);/);
   assert.match(pipelineSource, /peer\.onicecandidate = \(event\) => \{/);
   assert.match(pipelineSource, /this\.queueOrPatchIceCandidate\(event\.candidate\.toJSON\(\)\)/);
   assert.match(pipelineSource, /sdp_mid: candidate\.sdpMid/);
@@ -38,6 +40,7 @@ test('voice pipeline client emits setup diagnostics with elapsed milliseconds', 
   assert.match(pipelineSource, /private diagnostic\(event: string, detail: Record<string, unknown> = \{\}\): void/);
   assert.match(pipelineSource, /elapsed_ms: Math\.round\(performance\.now\(\) - this\.startedAt\)/);
   assert.match(pipelineSource, /this\.diagnostic\('setup:turn_config_ready'/);
+  assert.match(pipelineSource, /this\.diagnostic\('cloud:session_started'/);
   assert.match(pipelineSource, /this\.diagnostic\('setup:microphone_ready'/);
   assert.match(pipelineSource, /this\.diagnostic\('offer:answer_received'/);
   assert.match(pipelineSource, /this\.diagnostic\('setup:complete'/);

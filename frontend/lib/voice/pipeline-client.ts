@@ -16,6 +16,27 @@ export interface VoicePipelineClientOptions extends VoicePipelineClientEvents {
   callId: string;
 }
 
+interface PipecatCloudConfig {
+  agentName: string;
+  publicApiKey: string;
+  apiBaseUrl: string;
+}
+
+interface PipecatCloudSession {
+  offerUrl: string;
+  iceServers: RTCIceServer[];
+}
+
+function getPipecatCloudConfig(): PipecatCloudConfig | null {
+  const agentName = process.env.NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME?.trim();
+  const publicApiKey = process.env.NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY?.trim();
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_PIPECAT_CLOUD_API_BASE_URL || 'https://api.pipecat.daily.co/v1/public')
+    .replace(/\/+$/, '');
+
+  if (!agentName || !publicApiKey) return null;
+  return { agentName, publicApiKey, apiBaseUrl };
+}
+
 export class VoicePipelineClient {
   private peer: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
@@ -23,6 +44,9 @@ export class VoicePipelineClient {
   private pcId: string | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private stopped = false;
+  private offerUrl = apiUrl('/offer');
+  private patchOfferUrl = apiUrl('/offer');
+  private signalingHeaders: HeadersInit = { 'Content-Type': 'application/json' };
   private readonly startedAt = performance.now();
 
   constructor(private readonly options: VoicePipelineClientOptions) {}
@@ -30,9 +54,9 @@ export class VoicePipelineClient {
   async start(): Promise<void> {
     try {
       this.options.onState?.('connecting');
-      const turnConfigPromise = fetch(apiUrl('/turn-config'), API_FETCH_OPTIONS);
+      const cloudSessionPromise = this.startPipecatCloudSession();
       const localStreamPromise = navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      const [turnConfigResponse, localStream] = await Promise.all([turnConfigPromise, localStreamPromise]);
+      const [cloudSession, localStream] = await Promise.all([cloudSessionPromise, localStreamPromise]);
       this.localStream = localStream;
       if (this.stopped) {
         localStream.getTracks().forEach((track) => track.stop());
@@ -40,9 +64,7 @@ export class VoicePipelineClient {
         this.ensureActive();
       }
       this.ensureActive();
-      if (!turnConfigResponse.ok) throw new Error('Could not load voice transport config');
-      this.diagnostic('setup:turn_config_ready');
-      const iceServers = (await turnConfigResponse.json()) as RTCIceServer[];
+      const iceServers = cloudSession?.iceServers ?? await this.loadLocalIceServers();
       this.ensureActive();
       this.diagnostic('setup:microphone_ready');
       const peer = new RTCPeerConnection({ iceServers });
@@ -102,10 +124,10 @@ export class VoicePipelineClient {
       await peer.setLocalDescription(offer);
       this.ensureActive();
 
-      const response = await fetch(apiUrl('/offer'), {
+      const response = await fetch(this.offerUrl, {
         ...API_FETCH_OPTIONS,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.signalingHeaders,
         body: JSON.stringify({
           type: peer.localDescription?.type,
           sdp: peer.localDescription?.sdp,
@@ -176,10 +198,10 @@ export class VoicePipelineClient {
   private async patchIceCandidates(candidates: RTCIceCandidateInit[]): Promise<void> {
     if (!this.pcId || this.stopped || !candidates.length) return;
     try {
-      const response = await fetch(apiUrl('/offer'), {
+      const response = await fetch(this.patchOfferUrl, {
         ...API_FETCH_OPTIONS,
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.signalingHeaders,
         body: JSON.stringify({
           pc_id: this.pcId,
           candidates: candidates.map((candidate) => ({
@@ -196,6 +218,60 @@ export class VoicePipelineClient {
         reason: error instanceof Error ? error.message || error.name : String(error),
       });
     }
+  }
+
+  private async loadLocalIceServers(): Promise<RTCIceServer[]> {
+    const turnConfigResponse = await fetch(apiUrl('/turn-config'), API_FETCH_OPTIONS);
+    if (!turnConfigResponse.ok) throw new Error('Could not load voice transport config');
+    this.diagnostic('setup:turn_config_ready');
+    return await turnConfigResponse.json() as RTCIceServer[];
+  }
+
+  private async startPipecatCloudSession(): Promise<PipecatCloudSession | null> {
+    const cloudConfig = getPipecatCloudConfig();
+    if (!cloudConfig) return null;
+
+    const startUrl = `${cloudConfig.apiBaseUrl}/${encodeURIComponent(cloudConfig.agentName)}/start`;
+    const response = await fetch(startUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${cloudConfig.publicApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        transport: 'webrtc',
+        enableDefaultIceServers: true,
+        body: {
+          session_id: this.options.sessionId,
+          call_id: this.options.callId,
+        },
+      }),
+    });
+    this.ensureActive();
+    const payload = await response.json() as {
+      error?: string;
+      message?: string;
+      sessionId?: string;
+      iceConfig?: { iceServers?: RTCIceServer[] };
+    };
+    this.ensureActive();
+    if (!response.ok || !payload.sessionId) {
+      throw new Error(payload.error || payload.message || 'Could not start Pipecat Cloud voice session');
+    }
+
+    const sessionPath = `${encodeURIComponent(cloudConfig.agentName)}/sessions/${encodeURIComponent(payload.sessionId)}/api/offer`;
+    const cloudSession = {
+      offerUrl: `${cloudConfig.apiBaseUrl}/${sessionPath}`,
+      iceServers: payload.iceConfig?.iceServers ?? [],
+    };
+    this.offerUrl = cloudSession.offerUrl;
+    this.patchOfferUrl = cloudSession.offerUrl;
+    this.signalingHeaders = {
+      'Authorization': `Bearer ${cloudConfig.publicApiKey}`,
+      'Content-Type': 'application/json',
+    };
+    this.diagnostic('cloud:session_started', { session_id: payload.sessionId });
+    return cloudSession;
   }
 
   private ensureActive(): void {

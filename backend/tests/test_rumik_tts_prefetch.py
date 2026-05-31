@@ -188,6 +188,16 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, self.service._request_queue.qsize())
         self.assertIsNone(self.service._active_request)
 
+    async def test_interruption_starts_background_reconnect_for_next_turn(self) -> None:
+        self.service._disconnect_websocket = AsyncMock()
+        await exhaust(self.service.run_tts("Pehla sentence.", "turn-1"))
+        await asyncio.sleep(0)
+
+        await self.service.on_audio_context_interrupted("turn-1")
+        await asyncio.sleep(0)
+
+        self.service._connect.assert_awaited_once()
+
     async def test_disconnect_sends_graceful_close_message(self) -> None:
         self.service.stop_all_metrics = AsyncMock()
         self.service._call_event_handler = AsyncMock()

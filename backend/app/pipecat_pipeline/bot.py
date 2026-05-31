@@ -72,6 +72,33 @@ async def resolve_call_context(request_data: dict[str, Any] | None) -> CallConte
 
 
 async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
+    from pipecat.transports.base_transport import TransportParams
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+
+    transport = SmallWebRTCTransport(
+        webrtc_connection=webrtc_connection,
+        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True, audio_out_10ms_chunks=2),
+    )
+    await run_pipeline(transport, context)
+
+
+async def bot(runner_args: Any) -> None:
+    from pipecat.runner.types import SmallWebRTCRunnerArguments
+    from pipecat.transports.base_transport import TransportParams
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+
+    if not isinstance(runner_args, SmallWebRTCRunnerArguments):
+        raise RuntimeError(f"Unsupported Pipecat Cloud runner arguments: {type(runner_args).__name__}")
+
+    context = await resolve_call_context(runner_args.body)
+    transport = SmallWebRTCTransport(
+        webrtc_connection=runner_args.webrtc_connection,
+        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True, audio_out_10ms_chunks=2),
+    )
+    await run_pipeline(transport, context)
+
+
+async def run_pipeline(transport: Any, context: CallContext) -> None:
     settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is required to run the Pipecat voice agent.")
@@ -94,14 +121,8 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
     from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
     from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
-    from pipecat.transports.base_transport import TransportParams
-    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
     from pipecat.workers.runner import WorkerRunner
 
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True, audio_out_10ms_chunks=2),
-    )
     stt = OpenAIRealtimeSTTService(
         api_key=settings.openai_api_key,
         turn_detection=False,

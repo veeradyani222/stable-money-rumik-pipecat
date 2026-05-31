@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 RUMIK_SAMPLE_RATE = 24000
 
 
+def _log_rumik_event(event: str, **payload: Any) -> None:
+    logger.info(
+        "%s %s",
+        event,
+        json.dumps({"event": event, **payload}, ensure_ascii=False, default=str),
+    )
+
+
 @dataclass(frozen=True)
 class _RumikTTSRequest:
     text: str
@@ -39,6 +47,12 @@ class RumikTTSService:
             raise RuntimeError("RUMIK_API_KEY is required for Rumik TTS")
         rumik_text = normalize_rumik_text(text)[:2000]
         client = get_shared_http_client()
+        started_at = time.monotonic()
+        _log_rumik_event(
+            "rumik_session_create_start",
+            text_chars=len(rumik_text),
+            model=self.settings.rumik_tts_model,
+        )
         response = await client.post(
             f"{self.settings.rumik_base_url}/v1/tts/ws-connect",
             headers={"Authorization": f"Bearer {self.settings.rumik_api_key}", "Content-Type": "application/json"},
@@ -46,6 +60,15 @@ class RumikTTSService:
             timeout=20.0,
         )
         data = response.json()
+        _log_rumik_event(
+            "rumik_session_create_done",
+            status_code=response.status_code,
+            elapsed_s=round(time.monotonic() - started_at, 3),
+            request_id=data.get("request_id"),
+            expires_in=data.get("expires_in"),
+            text_chars=len(rumik_text),
+            model=self.settings.rumik_tts_model,
+        )
         if response.status_code >= 400:
             raise RuntimeError(f"Rumik session failed: {data}")
         return {**data, "text": rumik_text}
@@ -90,15 +113,52 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             self._cached_session: dict[str, Any] | None = None
             self._cached_session_time: float = 0.0
             self._session_prefetch_task: asyncio.Task | None = None
+            self._interruption_reconnect_task: asyncio.Task | None = None
             self._SESSION_CACHE_TTL = 55.0  # seconds; discard stale tokens
+            self._last_ws_connected_at: float | None = None
+            self._last_ws_activity_at: float | None = None
+            self._active_request_started_at: float | None = None
+            self._active_audio_bytes = 0
 
         def can_generate_metrics(self) -> bool:
             return True
 
+        def _websocket_state_name(self) -> str | None:
+            state = getattr(self._websocket, "state", None)
+            return getattr(state, "name", None)
+
+        def _idle_age_s(self) -> float | None:
+            if self._last_ws_activity_at is None:
+                return None
+            return round(time.monotonic() - self._last_ws_activity_at, 3)
+
+        def _connection_age_s(self) -> float | None:
+            if self._last_ws_connected_at is None:
+                return None
+            return round(time.monotonic() - self._last_ws_connected_at, 3)
+
+        def _active_elapsed_s(self) -> float | None:
+            if self._active_request_started_at is None:
+                return None
+            return round(time.monotonic() - self._active_request_started_at, 3)
+
         async def preconnect(self) -> None:
             if self._websocket and self._websocket.state is State.OPEN:
+                _log_rumik_event(
+                    "rumik_preconnect_skip_open",
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                )
                 return
-            await self._connect_websocket()
+            _log_rumik_event("rumik_preconnect_start", ws_state=self._websocket_state_name())
+            await self._connect_websocket(source="preconnect", prefetch=False)
+            _log_rumik_event(
+                "rumik_preconnect_done",
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
 
         async def start(self, frame: StartFrame):
             await super().start(frame)
@@ -114,7 +174,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
 
         async def _connect(self):
             await super()._connect()
-            await self._connect_websocket()
+            await self._connect_websocket(source="connect", prefetch=True)
             if self._websocket and not self._receive_task:
                 self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
 
@@ -126,17 +186,39 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             await self._clear_request_state()
             await self._disconnect_websocket()
 
-        async def _connect_websocket(self):
+        async def _connect_websocket(self, *, source: str = "connect", prefetch: bool = True):
+            started_at = time.monotonic()
             try:
                 if self._websocket and self._websocket.state is State.OPEN:
+                    _log_rumik_event(
+                        "rumik_ws_connect_skip_open",
+                        source=source,
+                        ws_state=self._websocket_state_name(),
+                        idle_age_s=self._idle_age_s(),
+                        connection_age_s=self._connection_age_s(),
+                    )
                     return
+                _log_rumik_event(
+                    "rumik_ws_connect_start",
+                    source=source,
+                    prefetch=prefetch,
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                    has_cached_session=bool(self._cached_session),
+                    active_request=bool(self._active_request),
+                )
                 # Use a pre-cached session token if available and fresh,
                 # otherwise fetch a new one (HTTP POST to Rumik).
                 session = None
                 if self._cached_session and (time.monotonic() - self._cached_session_time) < self._SESSION_CACHE_TTL:
                     session = self._cached_session
                     self._cached_session = None
-                    logger.debug("PipecatRumikTTSService using pre-cached session token")
+                    _log_rumik_event(
+                        "rumik_ws_connect_using_cached_session",
+                        source=source,
+                        cached_age_s=round(time.monotonic() - self._cached_session_time, 3),
+                    )
                 if not session:
                     session = await adapter.create_session("init")
                 ws_url = session.get("ws_url")
@@ -144,14 +226,33 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 if not ws_url or not token:
                     raise RuntimeError(f"Rumik session response missing ws_url/token: {session}")
                 self._websocket = await websockets_connect(f"{ws_url}?token={quote(str(token))}")
+                self._last_ws_connected_at = time.monotonic()
+                self._last_ws_activity_at = self._last_ws_connected_at
                 await self._call_event_handler("on_connected")
+                _log_rumik_event(
+                    "rumik_ws_connect_done",
+                    source=source,
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    ws_state=self._websocket_state_name(),
+                    replayed_active_request=bool(self._active_request),
+                )
                 if self._active_request:
                     await self._send_active_request()
                 # Start pre-fetching the next session token in the background
                 # so the next reconnection is nearly instant.
-                self._start_session_prefetch()
+                if prefetch:
+                    self._start_session_prefetch()
             except Exception as exc:
+                _log_rumik_event(
+                    "rumik_ws_connect_failed",
+                    source=source,
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    error=str(exc),
+                    ws_state=self._websocket_state_name(),
+                )
                 self._websocket = None
+                self._last_ws_connected_at = None
+                self._last_ws_activity_at = None
                 # If we used a cached session and it failed, clear it and
                 # let the next attempt fetch a fresh one.
                 self._cached_session = None
@@ -159,6 +260,12 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 await self._call_event_handler("on_connection_error", str(exc))
 
         async def _disconnect_websocket(self):
+            _log_rumik_event(
+                "rumik_ws_disconnect_start",
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
             try:
                 await self.stop_all_metrics()
                 if self._websocket:
@@ -170,6 +277,9 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                         await self._websocket.close()
             finally:
                 self._websocket = None
+                self._last_ws_connected_at = None
+                self._last_ws_activity_at = None
+                _log_rumik_event("rumik_ws_disconnect_done")
                 await self._call_event_handler("on_disconnected")
 
         def _get_websocket(self):
@@ -187,6 +297,12 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             if self._session_prefetch_task:
                 self._session_prefetch_task.cancel()
                 self._session_prefetch_task = None
+            if (
+                self._interruption_reconnect_task
+                and self._interruption_reconnect_task is not asyncio.current_task()
+            ):
+                await self.cancel_task(self._interruption_reconnect_task)
+                self._interruption_reconnect_task = None
             self._request_queue = asyncio.Queue()
             self._active_request = None
             self._active_done = asyncio.Event()
@@ -196,18 +312,78 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         def _start_session_prefetch(self):
             """Kick off a background task to pre-fetch the next Rumik session token."""
             if self._session_prefetch_task and not self._session_prefetch_task.done():
+                _log_rumik_event("rumik_session_prefetch_skip_running")
                 return
+            _log_rumik_event("rumik_session_prefetch_start")
             self._session_prefetch_task = self.create_task(self._prefetch_session())
 
         async def _prefetch_session(self):
             """Pre-fetch a Rumik session token so the next reconnect is near-instant."""
+            started_at = time.monotonic()
             try:
                 session = await adapter.create_session("init")
                 self._cached_session = session
                 self._cached_session_time = time.monotonic()
-                logger.debug("PipecatRumikTTSService pre-cached next session token")
-            except Exception:
+                _log_rumik_event(
+                    "rumik_session_prefetch_done",
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    expires_in=session.get("expires_in"),
+                    request_id=session.get("request_id"),
+                )
+            except Exception as exc:
                 self._cached_session = None
+                _log_rumik_event(
+                    "rumik_session_prefetch_failed",
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    error=str(exc),
+                )
+
+        def _start_interruption_reconnect(self, context_id: str):
+            if self._interruption_reconnect_task and not self._interruption_reconnect_task.done():
+                _log_rumik_event("rumik_interruption_reconnect_skip_running", context_id=context_id)
+                return
+            _log_rumik_event("rumik_interruption_reconnect_start", context_id=context_id)
+            self._interruption_reconnect_task = self.create_task(self._reconnect_after_interruption(context_id))
+
+        async def _reconnect_after_interruption(self, context_id: str):
+            started_at = time.monotonic()
+            try:
+                await self._connect()
+                _log_rumik_event(
+                    "rumik_interruption_reconnect_done",
+                    context_id=context_id,
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    ws_state=self._websocket_state_name(),
+                    connection_age_s=self._connection_age_s(),
+                )
+            except asyncio.CancelledError:
+                _log_rumik_event(
+                    "rumik_interruption_reconnect_cancelled",
+                    context_id=context_id,
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                )
+                raise
+            except Exception as exc:
+                _log_rumik_event(
+                    "rumik_interruption_reconnect_failed",
+                    context_id=context_id,
+                    elapsed_s=round(time.monotonic() - started_at, 3),
+                    error=str(exc),
+                    ws_state=self._websocket_state_name(),
+                )
+            finally:
+                if self._interruption_reconnect_task is asyncio.current_task():
+                    self._interruption_reconnect_task = None
+
+        async def _await_interruption_reconnect(self):
+            task = self._interruption_reconnect_task
+            if not task or task.done() or task is asyncio.current_task():
+                return
+            _log_rumik_event(
+                "rumik_interruption_reconnect_wait",
+                ws_state=self._websocket_state_name(),
+            )
+            await task
 
         def _ensure_sender_task(self):
             if not self._sender_task:
@@ -233,18 +409,53 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         async def _send_active_request(self):
             if not self._active_request:
                 return
+            self._active_request_started_at = time.monotonic()
+            self._active_audio_bytes = 0
+            _log_rumik_event(
+                "rumik_send_text_start",
+                context_id=self._active_request.context_id,
+                text_chars=len(self._active_request.text),
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
             message = json.dumps({"text": self._active_request.text, "speaker_id": 0})
             await self._get_websocket().send(message)
+            self._last_ws_activity_at = time.monotonic()
+            _log_rumik_event(
+                "rumik_send_text_done",
+                context_id=self._active_request.context_id,
+                text_chars=len(self._active_request.text),
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
 
         async def _send_or_reconnect_active_request(self):
             if not self._websocket or self._websocket.state is State.CLOSED:
+                _log_rumik_event(
+                    "rumik_reconnect_before_send",
+                    reason="missing_or_closed",
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                    active_request=bool(self._active_request),
+                )
                 await self._connect()
                 if not self._websocket:
                     raise RuntimeError("Rumik WebSocket reconnect failed")
                 return
             try:
                 await self._send_active_request()
-            except Exception:
+            except Exception as exc:
+                _log_rumik_event(
+                    "rumik_reconnect_after_send_error",
+                    error=str(exc),
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                    active_request=bool(self._active_request),
+                )
                 if not await self._try_reconnect(report_error=self._report_error):
                     raise RuntimeError("Rumik WebSocket reconnect failed")
 
@@ -252,6 +463,13 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             try:
                 while True:
                     request = await self._request_queue.get()
+                    _log_rumik_event(
+                        "rumik_sender_request_dequeued",
+                        context_id=request.context_id,
+                        text_chars=len(request.text),
+                        queued_after_get=self._request_queue.qsize(),
+                        ws_state=self._websocket_state_name(),
+                    )
                     self._active_request = request
                     self._active_done.clear()
                     try:
@@ -272,6 +490,16 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             request = self._active_request
             if not request:
                 return
+            _log_rumik_event(
+                "rumik_request_complete",
+                context_id=request.context_id,
+                text_chars=len(request.text),
+                audio_bytes=self._active_audio_bytes,
+                elapsed_since_send_s=self._active_elapsed_s(),
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
             pending = self._pending_by_context.get(request.context_id, 0) - 1
             if pending > 0:
                 self._pending_by_context[request.context_id] = pending
@@ -279,6 +507,8 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 self._pending_by_context.pop(request.context_id, None)
             self._active_done.set()
             await self._finish_context_if_drained(request.context_id)
+            self._active_request_started_at = None
+            self._active_audio_bytes = 0
 
         async def _finish_context_if_drained(self, context_id: str):
             if context_id not in self._flushed_context_ids:
@@ -301,6 +531,17 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             request = self._active_request
             if isinstance(message, bytes):
                 if request:
+                    self._last_ws_activity_at = time.monotonic()
+                    if self._active_audio_bytes == 0:
+                        _log_rumik_event(
+                            "rumik_first_pcm",
+                            context_id=request.context_id,
+                            chunk_bytes=len(message),
+                            elapsed_since_send_s=self._active_elapsed_s(),
+                            ws_state=self._websocket_state_name(),
+                            connection_age_s=self._connection_age_s(),
+                        )
+                    self._active_audio_bytes += len(message)
                     await self.stop_ttfb_metrics()
                     await self.append_to_audio_context(
                         request.context_id,
@@ -313,10 +554,42 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 return
             message_type = payload.get("type")
             if message_type == "done" and request:
+                self._last_ws_activity_at = time.monotonic()
+                _log_rumik_event(
+                    "rumik_done",
+                    context_id=request.context_id,
+                    request_id=payload.get("request_id"),
+                    audio_duration=payload.get("audio_duration"),
+                    total_time=payload.get("total_time"),
+                    rtf=payload.get("rtf"),
+                    total_bytes=payload.get("total_bytes"),
+                    credits_used=payload.get("credits_used"),
+                    received_audio_bytes=self._active_audio_bytes,
+                    elapsed_since_send_s=self._active_elapsed_s(),
+                    ws_state=self._websocket_state_name(),
+                    connection_age_s=self._connection_age_s(),
+                )
                 await self._complete_active_request()
             elif message_type == "queued":
+                self._last_ws_activity_at = time.monotonic()
+                _log_rumik_event(
+                    "rumik_queued",
+                    context_id=request.context_id if request else None,
+                    queue_depth=payload.get("queue_depth"),
+                    elapsed_since_send_s=self._active_elapsed_s(),
+                    ws_state=self._websocket_state_name(),
+                    connection_age_s=self._connection_age_s(),
+                )
                 return
             elif payload.get("error"):
+                self._last_ws_activity_at = time.monotonic()
+                _log_rumik_event(
+                    "rumik_error_message",
+                    context_id=request.context_id if request else None,
+                    error=payload.get("error"),
+                    elapsed_since_send_s=self._active_elapsed_s(),
+                    ws_state=self._websocket_state_name(),
+                )
                 await self.push_error(error_msg=f"Rumik TTS error: {payload}")
                 await self._complete_active_request()
 
@@ -325,11 +598,30 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 await self._handle_rumik_message(message)
 
         async def on_audio_context_interrupted(self, context_id: str):
+            _log_rumik_event(
+                "rumik_audio_context_interrupted",
+                context_id=context_id,
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+                queued_requests=self._request_queue.qsize(),
+                active_request=bool(self._active_request),
+            )
             await self._disconnect()
+            self._start_interruption_reconnect(context_id)
             await super().on_audio_context_interrupted(context_id)
 
         async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
             try:
+                _log_rumik_event(
+                    "rumik_run_tts_start",
+                    context_id=context_id,
+                    text_chars=len(text),
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                )
+                await self._await_interruption_reconnect()
                 if not self._websocket or self._websocket.state is State.CLOSED:
                     await self._connect()
                 if not self._websocket:
@@ -338,11 +630,26 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 request = _RumikTTSRequest(text=rumik_text, context_id=context_id)
                 self._pending_by_context[context_id] = self._pending_by_context.get(context_id, 0) + 1
                 await self._request_queue.put(request)
+                _log_rumik_event(
+                    "rumik_run_tts_queued",
+                    context_id=context_id,
+                    text_chars=len(rumik_text),
+                    pending_for_context=self._pending_by_context[context_id],
+                    queued_requests=self._request_queue.qsize(),
+                    ws_state=self._websocket_state_name(),
+                )
                 self._ensure_sender_task()
                 self._ensure_context_keepalive_task()
                 await self.start_tts_usage_metrics(text)
                 yield None
             except Exception as exc:
+                _log_rumik_event(
+                    "rumik_run_tts_failed",
+                    context_id=context_id,
+                    text_chars=len(text),
+                    error=str(exc),
+                    ws_state=self._websocket_state_name(),
+                )
                 yield ErrorFrame(error=f"Rumik TTS failed: {exc}")
 
     return PipecatRumikTTSService()

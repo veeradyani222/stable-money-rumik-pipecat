@@ -1,0 +1,16 @@
+agent_name = "stable-money-rumik"
+secret_set = "stable-money-rumik-secrets"
+agent_profile = "agent-1x"
+region = "us-west"
+max_session_duration = 900
+
+[scaling]
+min_agents = 0
+max_agents = 5
+
+[build]
+context_dir = "backend"
+dockerfile = "Dockerfile"
+
+[build.exclude]
+patterns = ["tests/", ".pytest_cache/", "migrations/", "stable_money_rumik_backend.egg-info/"]
