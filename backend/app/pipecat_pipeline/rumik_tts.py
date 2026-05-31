@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +14,10 @@ from websockets.asyncio.client import connect as websockets_connect
 from websockets.protocol import State
 
 from app.core.config import get_settings
+from app.core.http_client import get_shared_http_client
 from app.domain.rumik_text import normalize_rumik_text
+
+logger = logging.getLogger(__name__)
 
 RUMIK_SAMPLE_RATE = 24000
 
@@ -33,12 +38,13 @@ class RumikTTSService:
         if not self.settings.rumik_api_key:
             raise RuntimeError("RUMIK_API_KEY is required for Rumik TTS")
         rumik_text = normalize_rumik_text(text)[:2000]
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(
-                f"{self.settings.rumik_base_url}/v1/tts/ws-connect",
-                headers={"Authorization": f"Bearer {self.settings.rumik_api_key}", "Content-Type": "application/json"},
-                json={"text": rumik_text, "model": self.settings.rumik_tts_model},
-            )
+        client = get_shared_http_client()
+        response = await client.post(
+            f"{self.settings.rumik_base_url}/v1/tts/ws-connect",
+            headers={"Authorization": f"Bearer {self.settings.rumik_api_key}", "Content-Type": "application/json"},
+            json={"text": rumik_text, "model": self.settings.rumik_tts_model},
+            timeout=20.0,
+        )
         data = response.json()
         if response.status_code >= 400:
             raise RuntimeError(f"Rumik session failed: {data}")
@@ -77,6 +83,14 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             self._active_done = asyncio.Event()
             self._pending_by_context: dict[str, int] = {}
             self._flushed_context_ids: set[str] = set()
+            # Session pre-caching: fetch the next Rumik session token while
+            # the current synthesis is still in progress so reconnections
+            # only need a WebSocket handshake (~200ms) instead of
+            # HTTP POST + WS handshake (~1.5s).
+            self._cached_session: dict[str, Any] | None = None
+            self._cached_session_time: float = 0.0
+            self._session_prefetch_task: asyncio.Task | None = None
+            self._SESSION_CACHE_TTL = 55.0  # seconds; discard stale tokens
 
         def can_generate_metrics(self) -> bool:
             return True
@@ -116,7 +130,15 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             try:
                 if self._websocket and self._websocket.state is State.OPEN:
                     return
-                session = await adapter.create_session("init")
+                # Use a pre-cached session token if available and fresh,
+                # otherwise fetch a new one (HTTP POST to Rumik).
+                session = None
+                if self._cached_session and (time.monotonic() - self._cached_session_time) < self._SESSION_CACHE_TTL:
+                    session = self._cached_session
+                    self._cached_session = None
+                    logger.debug("PipecatRumikTTSService using pre-cached session token")
+                if not session:
+                    session = await adapter.create_session("init")
                 ws_url = session.get("ws_url")
                 token = session.get("token")
                 if not ws_url or not token:
@@ -125,8 +147,14 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 await self._call_event_handler("on_connected")
                 if self._active_request:
                     await self._send_active_request()
+                # Start pre-fetching the next session token in the background
+                # so the next reconnection is nearly instant.
+                self._start_session_prefetch()
             except Exception as exc:
                 self._websocket = None
+                # If we used a cached session and it failed, clear it and
+                # let the next attempt fetch a fresh one.
+                self._cached_session = None
                 await self.push_error(error_msg=f"Rumik TTS connection failed: {exc}", exception=exc)
                 await self._call_event_handler("on_connection_error", str(exc))
 
@@ -156,11 +184,30 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             if self._context_keepalive_task:
                 await self.cancel_task(self._context_keepalive_task)
                 self._context_keepalive_task = None
+            if self._session_prefetch_task:
+                self._session_prefetch_task.cancel()
+                self._session_prefetch_task = None
             self._request_queue = asyncio.Queue()
             self._active_request = None
             self._active_done = asyncio.Event()
             self._pending_by_context.clear()
             self._flushed_context_ids.clear()
+
+        def _start_session_prefetch(self):
+            """Kick off a background task to pre-fetch the next Rumik session token."""
+            if self._session_prefetch_task and not self._session_prefetch_task.done():
+                return
+            self._session_prefetch_task = self.create_task(self._prefetch_session())
+
+        async def _prefetch_session(self):
+            """Pre-fetch a Rumik session token so the next reconnect is near-instant."""
+            try:
+                session = await adapter.create_session("init")
+                self._cached_session = session
+                self._cached_session_time = time.monotonic()
+                logger.debug("PipecatRumikTTSService pre-cached next session token")
+            except Exception:
+                self._cached_session = None
 
         def _ensure_sender_task(self):
             if not self._sender_task:

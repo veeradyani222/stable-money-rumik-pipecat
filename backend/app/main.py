@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import agent, onboarding, pipecat_sessions, voice
 from app.core.config import get_settings
+from app.core.http_client import close_shared_http_client
 from app.core.logging import configure_runtime_logging
 from app.db.pool import close_pool
 
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown():
         await pipecat_sessions.close_small_webrtc_handler()
+        await close_shared_http_client()
         await close_pool()
 
     app.include_router(onboarding.router)

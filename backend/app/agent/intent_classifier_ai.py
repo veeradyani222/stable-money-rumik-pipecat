@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.core.http_client import get_shared_http_client
 from app.domain.policies import STABLE_INTENT_POLICIES, route_for_intent, trace_stable_turn_route
 
 INTENT_IDS = [*STABLE_INTENT_POLICIES, "unknown"]
@@ -70,12 +71,13 @@ def _parse_intent(text: str) -> dict[str, Any] | None:
 
 async def _post_responses(api_key: str, body: dict[str, Any]) -> dict[str, Any] | None:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=body,
-            )
+        client = get_shared_http_client()
+        response = await client.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
+            timeout=10.0,
+        )
         if response.status_code >= 400:
             return None
         return response.json()
