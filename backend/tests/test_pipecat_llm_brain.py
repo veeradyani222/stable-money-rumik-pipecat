@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.pipecat_pipeline.call_context import CallContext
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
+    create_stable_llm_response_logger,
     normalize_tool_args_for_execution,
     register_stable_tool_handlers,
+    resolve_voice_route,
     select_voice_tool_names,
 )
 from app.domain.policies import route_for_intent
@@ -122,8 +125,154 @@ class PipecatLlmBrainTests(unittest.TestCase):
         self.assertEqual("route_policy_verify_then_account", scope)
         self.assertEqual(["verify_read_access", "get_payment_reconciliation_status"], tool_names)
 
+    def test_voice_tool_selection_keeps_verification_tool_for_multilingual_last_four_answer(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+            call_verified=False,
+            history=[
+                {
+                    "role": "model",
+                    "text": "Mujhe aapka mobile number verify karne ke liye last four digits chahiye.",
+                },
+            ],
+        )
+
+        tool_names, scope = select_voice_tool_names(
+            route={"intent": "unknown", "authTier": "Tier A", "tools": []},
+            context=context,
+            transcript="\u098f\u0995, \u098f\u0995, \u09a6\u09cb, \u09a4\u09bf\u09a8",
+        )
+
+        self.assertEqual("route_policy", scope)
+        self.assertEqual(["verify_read_access"], tool_names)
+
 
 class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_voice_route_uses_ai_fallback_resolver(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+        resolved = route_for_intent("fd.summary")
+
+        with patch(
+            "app.pipecat_pipeline.llm_brain.resolve_stable_turn_route_ai",
+            new=AsyncMock(return_value=resolved),
+        ) as resolve:
+            route, source = await resolve_voice_route(context, "show all my deposits")
+
+        self.assertEqual("router", source)
+        self.assertEqual("fd.summary", route["intent"])
+        resolve.assert_awaited_once_with("show all my deposits", [])
+
+    async def test_llm_response_logger_emits_full_ai_text_with_latest_transcript(self) -> None:
+        from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+            latest_transcript="payment status batao",
+            latest_route=route_for_intent("payment.failed"),
+            latest_tool_calls=["get_payment_reconciliation_status"],
+        )
+        events: list[tuple[str, dict[str, object]]] = []
+        processor = create_stable_llm_response_logger(
+            context,
+            log_event=lambda event, **payload: events.append((event, payload)),
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+
+        await processor.process_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+        await processor.process_frame(LLMTextFrame("[neutral] Payment check kar rahi hoon. "), FrameDirection.DOWNSTREAM)
+        await processor.process_frame(LLMTextFrame("Aapka paisa safe hai."), FrameDirection.DOWNSTREAM)
+        await processor.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
+
+        self.assertEqual(["voice_ai_response"], [event for event, _payload in events])
+        payload = events[0][1]
+        self.assertEqual("session-1234567890", payload["session_id"])
+        self.assertEqual("call-1", payload["call_id"])
+        self.assertEqual("payment status batao", payload["transcript"])
+        self.assertEqual("[neutral] Payment check kar rahi hoon. Aapka paisa safe hai.", payload["tts_text"])
+        self.assertEqual(["get_payment_reconciliation_status"], payload["tool_calls"])
+
+    async def test_verify_success_forces_remaining_original_route_tool(self) -> None:
+        llm = FakeLlm()
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={
+                "customer_id": "CUST-1",
+                "persona_id": "demo",
+                "name": "Demo User",
+                "mobile_last_4": "1123",
+                "date_of_birth": "1993-07-30",
+                "kyc_status": "approved",
+                "payments": [],
+                "fixed_deposits": [
+                    {"fd_id": "FD-1", "bank": "Bank A", "amount": 7000, "status": "booked"},
+                    {"fd_id": "FD-2", "bank": "Bank B", "amount": 5000, "status": "booked"},
+                ],
+                "open_tickets": [],
+                "secure_links": [],
+            },
+            call_verified=False,
+            verified_mobile_last4="1123",
+            latest_transcript="30th July, 1993",
+            latest_route=route_for_intent("fd.summary"),
+            latest_tool_names=["verify_read_access", "get_fd_summary"],
+        )
+        results: list[dict[str, object]] = []
+        events: list[tuple[str, dict[str, object]]] = []
+
+        class Params:
+            arguments: dict[str, object] = {}
+
+            async def result_callback(self, result: dict[str, object]) -> None:
+                results.append(result)
+
+        register_stable_tool_handlers(
+            llm,
+            context,
+            log_event=lambda event, **payload: events.append((event, payload)),
+        )
+
+        async def mark_verified(persist_context: CallContext) -> None:
+            persist_context.call_verified = True
+            persist_context.verified_mobile_last4 = persist_context.persona.get("mobile_last_4")
+            persist_context.pending_route = None
+
+        async def match_mobile(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"verdict": "match", "extracted_last_four": "1123", "model_answered": True}
+
+        async def match_dob(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {"verdict": "match", "model_answered": True}
+
+        with patch("app.pipecat_pipeline.llm_brain._persist_verified_call", new=AsyncMock(side_effect=mark_verified)), patch(
+            "app.agent.read_access.match_mobile_last_four_ai",
+            side_effect=match_mobile,
+        ), patch(
+            "app.agent.read_access.match_dob_ai",
+            side_effect=match_dob,
+        ):
+            handler = llm.registered["verify_read_access"]
+            await handler(Params())  # type: ignore[operator]
+
+        self.assertEqual(["verify_read_access", "get_fd_summary"], context.latest_tool_calls)
+        self.assertEqual(True, results[0]["ok"])
+        self.assertIn("FD records available", results[0]["summary"])
+        self.assertEqual("get_fd_summary", results[0]["data"]["post_verification_tool"])  # type: ignore[index]
+        self.assertEqual(
+            ["voice_tool_result", "voice_tool_result"],
+            [event for event, _payload in events],
+        )
+        self.assertEqual("verify_read_access", events[0][1]["tool"])
+        self.assertEqual("get_fd_summary", events[1][1]["tool"])
+
     async def test_send_secure_link_requires_verified_voice_call(self) -> None:
         llm = FakeLlm()
         context = CallContext(

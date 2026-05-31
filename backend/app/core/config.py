@@ -54,8 +54,3 @@ def get_settings() -> Settings:
         ).rstrip("/"),
         cors_origin=os.getenv("PYTHON_BACKEND_CORS_ORIGIN", "http://localhost:3000"),
     )
-
-
-def is_reasoning_model(model: str) -> bool:
-    name = model.lower()
-    return name.startswith(("gpt-5", "o1", "o3", "o4"))

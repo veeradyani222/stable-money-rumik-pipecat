@@ -267,8 +267,7 @@ async def verify_read_access(
 
     settings = get_settings()
     ai_enabled = bool(settings.openai_api_key) and os.getenv("STABLE_DISABLE_AI_MOBILE") != "1"
-    mobile_ok = mobile_last_four_matches(persona["mobile_last_4"], mobile_text)
-    if not mobile_ok and ai_enabled:
+    if ai_enabled:
         ai = await match_mobile_last_four_ai(mobile_text, persona["mobile_last_4"], api_key=settings.openai_api_key)
         mobile_ok = ai.get("verdict") == "match"
         if ai.get("verdict") == "unclear":
@@ -277,6 +276,8 @@ async def verify_read_access(
                 "[neutral] Samajh nahi aa paya. Kripya last four digits ek baar phir clearly batayein.",
                 {"auth_tier": "Tier B", "verification_step": "mobile_last_4_required", "verified": False, "mobile_step_verified": False},
             )
+    else:
+        mobile_ok = mobile_last_four_matches(persona["mobile_last_4"], mobile_text)
     if not mobile_ok:
         return _result(
             False,

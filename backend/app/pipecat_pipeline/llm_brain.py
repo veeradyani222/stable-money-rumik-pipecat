@@ -6,8 +6,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from app.agent.intent_classifier_ai import resolve_stable_turn_route_ai
 from app.db.pool import acquire
-from app.domain.policies import route_stable_turn
 from app.domain.secure_links import send_secure_link_for_session
 from app.domain.session_auth import mark_demo_call_mobile_gate_in_store, mark_demo_call_verified_in_store
 from app.domain.stable_llm_policy import (
@@ -94,10 +94,10 @@ def initial_stable_instructions(context: CallContext) -> str:
     )
 
 
-def resolve_voice_route(context: CallContext, transcript: str) -> tuple[dict[str, Any], str]:
+async def resolve_voice_route(context: CallContext, transcript: str) -> tuple[dict[str, Any], str]:
     if context.verified_mobile_last4 and context.pending_route:
         return context.pending_route, "pending_route"
-    return route_stable_turn(transcript, context.history), "router"
+    return await resolve_stable_turn_route_ai(transcript, context.history), "router"
 
 
 def select_voice_tool_names(
@@ -215,6 +215,19 @@ def _route_log_payload(route: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _post_verification_tool_name(context: CallContext) -> str | None:
+    route_tools = [
+        canonical_tool_name(tool)
+        for tool in (context.latest_route or {}).get("tools", [])
+        if canonical_tool_name(tool) != "verify_read_access"
+    ]
+    allowed_tools = {canonical_tool_name(tool) for tool in context.latest_tool_names}
+    for tool in route_tools:
+        if tool in allowed_tools:
+            return tool
+    return route_tools[0] if route_tools else None
+
+
 async def _persist_mobile_gate(context: CallContext, last_four: str, route: dict[str, Any] | None) -> None:
     context.verified_mobile_last4 = last_four
     context.pending_route = route
@@ -300,6 +313,41 @@ def register_stable_tool_handlers(
                 call_verified=context.call_verified,
                 verified_mobile_last4=context.verified_mobile_last4,
             )
+
+            if canonical == "verify_read_access" and isinstance(data, dict) and data.get("verified") is True:
+                post_tool = _post_verification_tool_name(context)
+                if post_tool:
+                    post_result = await execute_tool_with_context(
+                        context.persona,
+                        post_tool,
+                        {},
+                        call_verified=context.call_verified,
+                        verified_mobile_last4=context.verified_mobile_last4,
+                        create_support_ticket=lambda args: create_support_ticket_for_session(context.session_id, args),
+                        send_secure_link=lambda args: send_secure_link_for_session(context.session_id, args),
+                    )
+                    context.latest_tool_calls.append(post_tool)
+                    post_data = post_result.get("data") if isinstance(post_result, dict) else {}
+                    log_event(
+                        "voice_tool_result",
+                        session_id=context.session_id,
+                        call_id=context.call_id,
+                        tool=post_tool,
+                        raw_arguments={},
+                        normalized_arguments={},
+                        ok=post_result.get("ok") if isinstance(post_result, dict) else None,
+                        summary=post_result.get("summary") if isinstance(post_result, dict) else None,
+                        data=post_data,
+                        route=_route_log_payload(context.latest_route),
+                        call_verified=context.call_verified,
+                        verified_mobile_last4=context.verified_mobile_last4,
+                    )
+                    if isinstance(result, dict) and isinstance(post_result, dict):
+                        merged_data = dict(data)
+                        merged_data["post_verification_tool"] = post_tool
+                        merged_data["post_verification_result"] = post_data
+                        result["data"] = merged_data
+                        result["summary"] = f"{result.get('summary', '')} {post_result.get('summary', '')}".strip()
             await params.result_callback(result)
 
         return handler
@@ -320,7 +368,7 @@ def create_stable_turn_context_processor(context: CallContext, settings_class: t
                 return
 
             transcript = frame.text.strip()
-            route, route_source = resolve_voice_route(context, transcript)
+            route, route_source = await resolve_voice_route(context, transcript)
             tool_names, tool_scope = select_voice_tool_names(route=route, context=context, transcript=transcript)
             instructions = build_turn_instructions(route=route, tool_names=tool_names, context=context)
             context.latest_transcript = transcript
@@ -350,3 +398,41 @@ def create_stable_turn_context_processor(context: CallContext, settings_class: t
             await self.push_frame(frame, direction)
 
     return StableTurnContextProcessor(name="stable_turn_context")
+
+
+def create_stable_llm_response_logger(context: CallContext, *, log_event: StructuredLogEvent):
+    from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+    class StableLlmResponseLogger(FrameProcessor):
+        def __init__(self) -> None:
+            super().__init__(name="stable_llm_response_logger")
+            self._text_parts: list[str] = []
+
+        async def process_frame(self, frame: Any, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._text_parts = []
+            elif isinstance(frame, LLMTextFrame):
+                text = str(getattr(frame, "text", "") or "")
+                if text:
+                    self._text_parts.append(text)
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                text = "".join(self._text_parts).strip()
+                if text:
+                    log_event(
+                        "voice_ai_response",
+                        session_id=context.session_id,
+                        call_id=context.call_id,
+                        transcript=context.latest_transcript,
+                        tts_text=text,
+                        route=_route_log_payload(context.latest_route),
+                        tool_calls=list(context.latest_tool_calls),
+                        call_verified=context.call_verified,
+                        verified_mobile_last4=context.verified_mobile_last4,
+                    )
+                self._text_parts = []
+
+            await self.push_frame(frame, direction)
+
+    return StableLlmResponseLogger()

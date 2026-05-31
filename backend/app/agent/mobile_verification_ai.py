@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import get_settings, is_reasoning_model
+from app.core.config import get_settings
 
 
 def _extract_json_text(response: dict[str, Any]) -> str:
@@ -115,6 +115,7 @@ async def match_mobile_last_four_ai(
                 "verdict=unclear when the utterance has no digit content, is gibberish, or you cannot confidently determine all four digits.",
                 "If you can determine the four digits, return them as a four-digit string in extracted_last_four; otherwise return an empty string.",
                 "Do not guess. If you are not confident, return unclear.",
+                "Return only the required JSON fields. Do not include explanations or reasoning.",
             ]
         ),
         "max_output_tokens": 256,
@@ -131,15 +132,12 @@ async def match_mobile_last_four_ai(
                     "properties": {
                         "verdict": {"type": "string", "enum": ["match", "no_match", "unclear"]},
                         "extracted_last_four": {"type": "string"},
-                        "reason": {"type": "string"},
                     },
-                    "required": ["verdict", "extracted_last_four", "reason"],
+                    "required": ["verdict", "extracted_last_four"],
                 },
             }
         },
     }
-    if is_reasoning_model(model):
-        body["reasoning"] = {"effort": "low"}
 
     json_response = await _post_responses(key, body)
     if not json_response:

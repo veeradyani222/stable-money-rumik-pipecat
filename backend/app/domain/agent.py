@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from app.domain.policies import route_stable_turn
+from app.agent.intent_classifier_ai import resolve_stable_turn_route_ai
 from app.domain.rumik_text import normalize_rumik_text
 from app.domain.secure_links import send_secure_link_for_session
 from app.domain.support_tickets import create_support_ticket_for_session
@@ -66,7 +66,7 @@ async def run_stable_agent_turn(
     on_mobile_gate: Any | None = None,
 ) -> dict[str, Any]:
     route_source = "pending_route" if verified_mobile_last4 and pending_route else "router"
-    route = pending_route if route_source == "pending_route" else route_stable_turn(transcript, history)
+    route = pending_route if route_source == "pending_route" else await resolve_stable_turn_route_ai(transcript, history)
     tool_calls: list[str] = []
     verified = call_verified
     _log_agent_event(

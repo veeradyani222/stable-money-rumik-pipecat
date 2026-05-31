@@ -6,10 +6,12 @@ from fastapi.responses import JSONResponse
 
 from app.api import agent, onboarding, pipecat_sessions, voice
 from app.core.config import get_settings
+from app.core.logging import configure_runtime_logging
 from app.db.pool import close_pool
 
 
 def create_app() -> FastAPI:
+    configure_runtime_logging()
     settings = get_settings()
     app = FastAPI(title="Stable Money Rumik Python Backend")
     app.add_middleware(

@@ -15,6 +15,7 @@ from app.domain.session_auth import (
 from app.pipecat_pipeline.call_context import CallContext
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
+    create_stable_llm_response_logger,
     create_stable_turn_context_processor,
     initial_stable_instructions,
     register_stable_tool_handlers,
@@ -117,6 +118,7 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
         OpenAIResponsesLLMService.Settings,
         log_event=_log_voice_event,
     )
+    llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
     pipeline = Pipeline(
         [
@@ -125,6 +127,7 @@ async def run_bot(webrtc_connection: Any, context: CallContext) -> None:
             turn_context,
             user_aggregator,
             llm,
+            llm_response_logger,
             tts,
             assistant_aggregator,
             transport.output(),

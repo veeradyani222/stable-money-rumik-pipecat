@@ -184,6 +184,17 @@ def _account_tools_for_route(route: dict[str, Any]) -> list[str]:
     return [tool for tool in route.get("tools") or [] if tool != "verify_read_access"]
 
 
+def _recent_model_asked_for_mobile_last_four(history: list[dict[str, str]] | None) -> bool:
+    for item in reversed(history or []):
+        role = item.get("role")
+        text = (item.get("text") or "").lower()
+        if role == "user":
+            continue
+        if role == "model":
+            return "last four" in text or ("mobile" in text and "digit" in text)
+    return False
+
+
 def select_tool_names_for_request(
     *,
     route: dict[str, Any] | None,
@@ -192,12 +203,14 @@ def select_tool_names_for_request(
     transcript: str,
     history: list[dict[str, str]] | None,
 ) -> list[str]:
-    del transcript, history
+    del transcript
     route = route or _default_route()
     policy_tools = [tool for tool in route.get("tools") or [] if tool in stable_tool_declarations_by_name]
 
     if route.get("intent") == "unknown" and len(policy_tools) == 0:
         if verified_mobile_last4:
+            return ["verify_read_access"]
+        if not call_verified and _recent_model_asked_for_mobile_last_four(history):
             return ["verify_read_access"]
         return []
 

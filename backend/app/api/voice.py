@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ from app.domain.rumik_text import normalize_rumik_text
 from app.domain.session_auth import DEMO_SESSION_COOKIE, resolve_demo_session_id
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
+logger = logging.getLogger(__name__)
 
 OPENAI_TRANSCRIPT_PROMPT = (
     "Transcribe the complete user utterance from this call audio. Preserve the user language and script as spoken or typed. "
@@ -23,6 +25,8 @@ async def timing_log(body: dict[str, Any]):
     event = body.get("event")
     if not isinstance(event, str) or not event.strip():
         raise HTTPException(status_code=400, detail="Invalid timing event")
+    payload = {**body, "event": event}
+    logger.info("%s %s", event, json.dumps(payload, ensure_ascii=False, default=str))
     return {"ok": True}
 
 
@@ -114,4 +118,3 @@ async def openai_transcribe(audio: UploadFile = File(...)):
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=payload)
     return {"transcript": str(payload.get("text") or "").strip()}
-

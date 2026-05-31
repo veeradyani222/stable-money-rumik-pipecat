@@ -20,8 +20,8 @@ class VerificationAiModelTests(unittest.IsolatedAsyncioTestCase):
             captured_bodies.append(body)
             captured_models.append(str(body["model"]))
             if "mobile" in str(body.get("instructions")):
-                return {"output_text": '{"verdict":"match","extracted_last_four":"1123","reason":"ok"}'}
-            return {"output_text": '{"verdict":"match","reason":"ok"}'}
+                return {"output_text": '{"verdict":"match","extracted_last_four":"1123"}'}
+            return {"output_text": '{"verdict":"match"}'}
 
         with patch.dict(
             "os.environ",
@@ -50,6 +50,12 @@ class VerificationAiModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("stable-dob-verification-v2", captured_bodies[1]["prompt_cache_key"])
         self.assertIn("ANY language", str(captured_bodies[0]["instructions"]))
         self.assertIn("India the date convention is dd/mm/yyyy", str(captured_bodies[1]["instructions"]))
+        for body in captured_bodies:
+            self.assertIn("Do not include explanations or reasoning", str(body["instructions"]))
+            self.assertNotIn("reasoning", body)
+            schema = body["text"]["format"]["schema"]  # type: ignore[index]
+            self.assertNotIn("reason", schema["properties"])  # type: ignore[index]
+            self.assertNotIn("reason", schema["required"])  # type: ignore[index]
 
 
 if __name__ == "__main__":

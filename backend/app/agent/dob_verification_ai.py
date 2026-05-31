@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import get_settings, is_reasoning_model
+from app.core.config import get_settings
 
 
 def _extract_json_text(response: dict[str, Any]) -> str:
@@ -111,6 +111,7 @@ async def match_dob_ai(
                 "verdict=no_match when the caller clearly conveys a different calendar day.",
                 "verdict=unclear when the utterance has no date content, is gibberish, or the date is too ambiguous to determine.",
                 "Do not guess. If you are not confident, return unclear.",
+                "Return only the required JSON fields. Do not include explanations or reasoning.",
             ]
         ),
         "max_output_tokens": 256,
@@ -126,15 +127,12 @@ async def match_dob_ai(
                     "additionalProperties": False,
                     "properties": {
                         "verdict": {"type": "string", "enum": ["match", "no_match", "unclear"]},
-                        "reason": {"type": "string"},
                     },
-                    "required": ["verdict", "reason"],
+                    "required": ["verdict"],
                 },
             }
         },
     }
-    if is_reasoning_model(model):
-        body["reasoning"] = {"effort": "low"}
 
     json_response = await _post_responses(key, body)
     if not json_response:

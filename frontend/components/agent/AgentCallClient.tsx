@@ -11,7 +11,13 @@ import { PersonaDetailModal } from '@/components/onboarding/PersonaDetailModal';
 import { API_FETCH_OPTIONS, apiUrl } from '@/lib/api-base';
 import { VoicePipelineClient } from '@/lib/voice/pipeline-client';
 
-type CallState = 'idle' | 'calling' | 'connecting' | 'connected' | 'error';
+type CallState = 'idle' | 'connecting' | 'connected' | 'error';
+
+const CONNECTING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
+const RUMIK_VOICE_START_THRESHOLD = 8;
+const RUMIK_VOICE_START_FRAMES = 3;
+
+type VoiceTimingDetail = Record<string, string | number | boolean | null | undefined>;
 
 interface AgentSessionPayload {
   session_id: string;
@@ -25,6 +31,30 @@ function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function getCallStatusLabel(callState: CallState, duration: number, error: string, ringtoneActive: boolean): string {
+  if (callState === 'error') return error || 'Call failed';
+  if (callState === 'connecting') return 'Connecting...';
+  if (ringtoneActive) return 'Ringing...';
+  if (callState === 'connected') return formatDuration(duration);
+  return 'Ready to call';
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name;
+  return String(error);
+}
+
+function logVoiceTimingEvent(event: string, detail: VoiceTimingDetail = {}): void {
+  if (typeof window === 'undefined') return;
+  void fetch(apiUrl('/api/voice/timing-log'), {
+    ...API_FETCH_OPTIONS,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event, ...detail }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function BackIcon() {
@@ -78,12 +108,16 @@ export function AgentCallClient() {
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [ringtoneActive, setRingtoneActive] = useState(false);
   const [personaDataOpen, setPersonaDataOpen] = useState(false);
   const [voiceAnalyser, setVoiceAnalyser] = useState<AnalyserNode | null>(null);
 
   const pipelineClientRef = useRef<VoicePipelineClient | null>(null);
   const callStartedAtRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const remoteAudioContextRef = useRef<AudioContext | null>(null);
+  const remoteAudioFrameRef = useRef<number | null>(null);
+  const ringtoneRef = useRef<HTMLAudioElement | null>(null);
   const callStateRef = useRef<CallState>('idle');
 
   const setNextCallState = useCallback((state: CallState) => {
@@ -91,17 +125,73 @@ export function AgentCallClient() {
     setCallState(state);
   }, []);
 
+  const playConnectingRingtone = useCallback(() => {
+    if (typeof window === 'undefined') return;
+
+    if (!ringtoneRef.current) {
+      const ringtone = new Audio(CONNECTING_RINGTONE_SRC);
+      ringtone.loop = true;
+      ringtone.preload = 'auto';
+      ringtoneRef.current = ringtone;
+    }
+
+    const ringtone = ringtoneRef.current;
+    logVoiceTimingEvent('ringtone:play:request', {
+      src: CONNECTING_RINGTONE_SRC,
+      paused: ringtone.paused,
+      readyState: ringtone.readyState,
+    });
+    void ringtone.play()
+      .then(() => {
+        logVoiceTimingEvent('ringtone:play:started', {
+          src: CONNECTING_RINGTONE_SRC,
+          readyState: ringtone.readyState,
+        });
+      })
+      .catch((playError: unknown) => {
+        logVoiceTimingEvent('ringtone:play:failed', {
+          src: CONNECTING_RINGTONE_SRC,
+          reason: describeError(playError),
+          readyState: ringtone.readyState,
+        });
+      });
+  }, []);
+
+  const stopConnectingRingtone = useCallback((reason = 'manual') => {
+    setRingtoneActive(false);
+    const ringtone = ringtoneRef.current;
+    if (!ringtone) return;
+    ringtone.pause();
+    ringtone.currentTime = 0;
+    logVoiceTimingEvent('ringtone:stop', {
+      reason,
+      src: CONNECTING_RINGTONE_SRC,
+      readyState: ringtone.readyState,
+    });
+  }, []);
+
+  const stopRemoteAudioMonitor = useCallback(() => {
+    if (remoteAudioFrameRef.current !== null) {
+      window.cancelAnimationFrame(remoteAudioFrameRef.current);
+      remoteAudioFrameRef.current = null;
+    }
+    void remoteAudioContextRef.current?.close().catch(() => {});
+    remoteAudioContextRef.current = null;
+  }, []);
+
   const endCall = useCallback(() => {
+    stopConnectingRingtone('user_end_call');
     pipelineClientRef.current?.stop();
     pipelineClientRef.current = null;
     void audioContextRef.current?.close().catch(() => {});
     audioContextRef.current = null;
+    stopRemoteAudioMonitor();
     callStartedAtRef.current = null;
     setVoiceAnalyser(null);
     setIsListening(false);
     setDuration(0);
     setNextCallState('idle');
-  }, [setNextCallState]);
+  }, [setNextCallState, stopConnectingRingtone, stopRemoteAudioMonitor]);
 
   useEffect(() => {
     const nextSessionId = searchParams.get('session_id') || searchParams.get('sessionId') || '';
@@ -144,6 +234,17 @@ export function AgentCallClient() {
     pipelineClientRef.current?.setMuted(muted);
   }, [muted]);
 
+  useEffect(() => {
+    if (!ringtoneActive) return;
+    playConnectingRingtone();
+  }, [playConnectingRingtone, ringtoneActive]);
+
+  useEffect(() => () => {
+    stopConnectingRingtone('unmount');
+    stopRemoteAudioMonitor();
+    ringtoneRef.current = null;
+  }, [stopConnectingRingtone, stopRemoteAudioMonitor]);
+
   useEffect(() => () => endCall(), [endCall]);
 
   const attachLocalAnalyser = useCallback(async (stream: MediaStream) => {
@@ -158,10 +259,60 @@ export function AgentCallClient() {
     await context.resume();
   }, []);
 
+  const monitorRemoteStreamForRumikVoice = useCallback(async (stream: MediaStream) => {
+    if (typeof window === 'undefined') return;
+
+    try {
+      stopRemoteAudioMonitor();
+      const context = new AudioContext();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      const data = new Uint8Array(analyser.fftSize);
+      let activeFrames = 0;
+
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      remoteAudioContextRef.current = context;
+      logVoiceTimingEvent('remote_audio:voice_monitor_started', {
+        threshold: RUMIK_VOICE_START_THRESHOLD,
+        requiredFrames: RUMIK_VOICE_START_FRAMES,
+      });
+      await context.resume();
+
+      const sample = () => {
+        if (remoteAudioContextRef.current !== context) return;
+
+        analyser.getByteTimeDomainData(data);
+        let peak = 0;
+        for (const value of data) {
+          peak = Math.max(peak, Math.abs(value - 128));
+        }
+
+        activeFrames = peak >= RUMIK_VOICE_START_THRESHOLD ? activeFrames + 1 : 0;
+        if (activeFrames >= RUMIK_VOICE_START_FRAMES) {
+          logVoiceTimingEvent('remote_audio:voice_detected', { peak, activeFrames });
+          stopRemoteAudioMonitor();
+          stopConnectingRingtone('rumik_voice_started');
+          return;
+        }
+
+        remoteAudioFrameRef.current = window.requestAnimationFrame(sample);
+      };
+
+      remoteAudioFrameRef.current = window.requestAnimationFrame(sample);
+    } catch (monitorError) {
+      logVoiceTimingEvent('remote_audio:voice_monitor_failed', {
+        reason: describeError(monitorError),
+      });
+    }
+  }, [stopConnectingRingtone, stopRemoteAudioMonitor]);
+
   const startCall = useCallback(async () => {
     if (!session || !sessionId || pipelineClientRef.current) return;
     setError('');
     setIsListening(false);
+    setRingtoneActive(true);
+    playConnectingRingtone();
     setNextCallState('connecting');
 
     const callId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -172,6 +323,7 @@ export function AgentCallClient() {
       sessionId,
       callId,
       onState: (state) => {
+        if (pipelineClientRef.current !== client) return;
         if (state === 'connected') {
           callStartedAtRef.current = Date.now();
           setIsListening(true);
@@ -179,18 +331,34 @@ export function AgentCallClient() {
         }
         if (state === 'closed' && callStateRef.current !== 'idle') {
           setIsListening(false);
+          stopConnectingRingtone('pipeline_closed');
           setNextCallState('idle');
         }
         if (state === 'error') {
           setIsListening(false);
+          stopConnectingRingtone('pipeline_error');
           setNextCallState('error');
         }
       },
       onLocalStream: (stream) => {
+        if (pipelineClientRef.current !== client) return;
         void attachLocalAnalyser(stream);
       },
+      onRemoteStream: (stream) => {
+        if (pipelineClientRef.current !== client) return;
+        void monitorRemoteStreamForRumikVoice(stream);
+      },
       onError: (pipelineError) => {
+        if (pipelineClientRef.current !== client) return;
         setError(pipelineError.message || 'Pipecat voice pipeline failed');
+      },
+      onRemoteAudioStarted: () => {
+        if (pipelineClientRef.current !== client) return;
+        logVoiceTimingEvent('pipeline:remote_audio:element_started');
+      },
+      onDiagnostic: (event, detail) => {
+        if (pipelineClientRef.current !== client) return;
+        logVoiceTimingEvent(`pipeline:${event}`, detail as VoiceTimingDetail);
       },
     });
 
@@ -198,13 +366,27 @@ export function AgentCallClient() {
     try {
       await client.start();
     } catch (startError) {
-      pipelineClientRef.current?.stop();
+      if (pipelineClientRef.current !== client) {
+        client.stop();
+        return;
+      }
+
+      client.stop();
       pipelineClientRef.current = null;
       setError(startError instanceof Error ? startError.message : 'Could not start Pipecat call');
       setIsListening(false);
+      stopConnectingRingtone('start_error');
       setNextCallState('error');
     }
-  }, [attachLocalAnalyser, session, sessionId, setNextCallState]);
+  }, [
+    attachLocalAnalyser,
+    monitorRemoteStreamForRumikVoice,
+    playConnectingRingtone,
+    session,
+    sessionId,
+    setNextCallState,
+    stopConnectingRingtone,
+  ]);
 
   const enterCall = useCallback(async () => {
     setHasEnteredCall(true);
@@ -358,7 +540,7 @@ export function AgentCallClient() {
 
           <div className="voice-call-title">
             <p className="voice-call-title__status" aria-live="polite">
-              {callState === 'error' ? error || 'Call failed' : formatDuration(duration)}
+              {getCallStatusLabel(callState, duration, error, ringtoneActive)}
             </p>
           </div>
 
