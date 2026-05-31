@@ -24,6 +24,9 @@ test('voice pipeline client sends WebRTC signaling to the cloud session endpoint
   assert.match(pipelineSource, /this\.offerUrl = cloudSession\.offerUrl;/);
   assert.match(pipelineSource, /this\.patchOfferUrl = cloudSession\.offerUrl;/);
   assert.match(pipelineSource, /private signalingHeaders: HeadersInit = \{ 'Content-Type': 'application\/json' \};/);
+  assert.match(pipelineSource, /private signalingFetchOptions: RequestCredentials = 'include';/);
+  assert.match(pipelineSource, /credentials: this\.signalingFetchOptions/);
+  assert.match(pipelineSource, /this\.signalingFetchOptions = 'omit';/);
   assert.match(pipelineSource, /headers: this\.signalingHeaders/);
   assert.match(pipelineSource, /fetch\(this\.offerUrl/);
   assert.match(pipelineSource, /fetch\(this\.patchOfferUrl/);

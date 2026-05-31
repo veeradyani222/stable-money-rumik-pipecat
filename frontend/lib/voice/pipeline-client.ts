@@ -47,6 +47,7 @@ export class VoicePipelineClient {
   private offerUrl = apiUrl('/offer');
   private patchOfferUrl = apiUrl('/offer');
   private signalingHeaders: HeadersInit = { 'Content-Type': 'application/json' };
+  private signalingFetchOptions: RequestCredentials = 'include';
   private readonly startedAt = performance.now();
 
   constructor(private readonly options: VoicePipelineClientOptions) {}
@@ -125,7 +126,7 @@ export class VoicePipelineClient {
       this.ensureActive();
 
       const response = await fetch(this.offerUrl, {
-        ...API_FETCH_OPTIONS,
+        credentials: this.signalingFetchOptions,
         method: 'POST',
         headers: this.signalingHeaders,
         body: JSON.stringify({
@@ -199,7 +200,7 @@ export class VoicePipelineClient {
     if (!this.pcId || this.stopped || !candidates.length) return;
     try {
       const response = await fetch(this.patchOfferUrl, {
-        ...API_FETCH_OPTIONS,
+        credentials: this.signalingFetchOptions,
         method: 'PATCH',
         headers: this.signalingHeaders,
         body: JSON.stringify({
@@ -270,6 +271,7 @@ export class VoicePipelineClient {
       'Authorization': `Bearer ${cloudConfig.publicApiKey}`,
       'Content-Type': 'application/json',
     };
+    this.signalingFetchOptions = 'omit';
     this.diagnostic('cloud:session_started', { session_id: payload.sessionId });
     return cloudSession;
   }
