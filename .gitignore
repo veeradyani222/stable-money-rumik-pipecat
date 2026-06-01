@@ -23,6 +23,7 @@ build/
 
 # debug
 npm-debug.log*
+logs/
 
 # env files
 .env

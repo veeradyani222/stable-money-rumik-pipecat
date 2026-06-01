@@ -75,6 +75,17 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         self.assertIn("start_filler_audio=start_filler_audio", source)
         self.assertIn("            output_transport,", source)
 
+    def test_bot_wires_assignment_frame_trace_processor(self) -> None:
+        source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
+
+        self.assertIn("FrameTraceLogger", source)
+        self.assertIn("create_frame_trace_processor", source)
+        self.assertIn("frame_trace_logger = FrameTraceLogger(context)", source)
+        self.assertIn("frame_trace_processor = create_frame_trace_processor(", source)
+        self.assertIn("            frame_trace_processor,", source)
+        self.assertIn('"end_of_call"', source)
+        self.assertIn('reason="client_disconnected"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from app.domain.session_auth import (
 )
 from app.pipecat_pipeline.call_context import CallContext
 from app.pipecat_pipeline.filler_audio import create_filler_audio_player
+from app.pipecat_pipeline.frame_trace import FrameTraceLogger, create_frame_trace_processor
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
     create_stable_llm_response_logger,
@@ -224,6 +225,8 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
     llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
     opening_audio_ready_notifier = create_opening_audio_ready_notifier(context, log_event=_log_voice_event)
+    frame_trace_logger = FrameTraceLogger(context)
+    frame_trace_processor = create_frame_trace_processor(context, trace=frame_trace_logger)
     rumik_preconnect_task = asyncio.create_task(tts.preconnect())
 
     def _log_rumik_preconnect_result(task: asyncio.Task) -> None:
@@ -249,6 +252,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
             tts,
             assistant_aggregator,
             opening_audio_ready_notifier,
+            frame_trace_processor,
             output_transport,
         ]
     )
@@ -345,6 +349,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client):
+        frame_trace_logger.log("end_of_call", reason="client_disconnected")
         await worker.cancel()
 
     runner = WorkerRunner(handle_sigint=False)
