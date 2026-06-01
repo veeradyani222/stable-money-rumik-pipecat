@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -7,7 +8,9 @@ from app.pipecat_pipeline.call_context import CallContext
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
     create_stable_llm_response_logger,
+    create_stable_turn_context_processor,
     normalize_tool_args_for_execution,
+    preliminary_filler_intent,
     register_stable_tool_handlers,
     resolve_voice_route,
     select_voice_tool_names,
@@ -24,6 +27,34 @@ class FakeLlm:
 
 
 class PipecatLlmBrainTests(unittest.TestCase):
+    def test_preliminary_filler_skips_mobile_answer_during_verification(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={},
+            history=[
+                {
+                    "role": "model",
+                    "text": "Aapki mobile number ke last four digits batayein.",
+                },
+            ],
+            latest_route=route_for_intent("kyc.status"),
+            latest_tool_names=["verify_read_access", "get_kyc_status"],
+        )
+
+        self.assertIsNone(preliminary_filler_intent(context, "2468"))
+
+    def test_preliminary_filler_skips_dob_answer_during_verification(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={},
+            verified_mobile_last4="2468",
+            pending_route=route_for_intent("kyc.status"),
+        )
+
+        self.assertIsNone(preliminary_filler_intent(context, "30th July 1993"))
+
     def test_pipecat_schema_contains_requested_tools_only(self) -> None:
         schema = build_pipecat_tools_schema(["verify_read_access", "create_support_ticket"])
         tools = {tool.name: tool for tool in schema.standard_tools}
@@ -150,6 +181,187 @@ class PipecatLlmBrainTests(unittest.TestCase):
 
 
 class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_turn_context_starts_neutral_filler_for_verification_answer(self) -> None:
+        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+            verified_mobile_last4="1123",
+            pending_route=route_for_intent("kyc.status"),
+        )
+        started_fillers: list[str] = []
+        events: list[tuple[str, dict[str, object]]] = []
+
+        class Settings:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        processor = create_stable_turn_context_processor(
+            context,
+            Settings,
+            log_event=lambda event, **payload: events.append((event, payload)),
+            start_filler_audio=started_fillers.append,
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+
+        await processor.process_frame(
+            TranscriptionFrame("30th July 1993", "", 0),
+            FrameDirection.DOWNSTREAM,
+        )
+
+        self.assertEqual(["unknown"], started_fillers)
+        self.assertIn(
+            (
+                "voice_filler_selected",
+                {
+                    "session_id": "session-1234567890",
+                    "call_id": "call-1",
+                    "intent": "unknown",
+                    "route_source": "verification",
+                },
+            ),
+            events,
+        )
+
+    async def test_turn_context_starts_filler_before_waiting_for_route_resolution(self) -> None:
+        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+        release_route = asyncio.Event()
+        started_fillers: list[str] = []
+
+        async def resolve_after_release(*_args: object, **_kwargs: object) -> tuple[dict[str, object], str]:
+            await release_route.wait()
+            return route_for_intent("payment.failed"), "router"
+
+        class Settings:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        processor = create_stable_turn_context_processor(
+            context,
+            Settings,
+            log_event=lambda *_args, **_kwargs: None,
+            start_filler_audio=started_fillers.append,
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+
+        with patch("app.pipecat_pipeline.llm_brain.resolve_voice_route", side_effect=resolve_after_release):
+            processing = asyncio.create_task(
+                processor.process_frame(
+                    TranscriptionFrame("my payment failed", "", 0),
+                    FrameDirection.DOWNSTREAM,
+                )
+            )
+            await asyncio.sleep(0)
+
+            self.assertEqual(["payment.failed"], started_fillers)
+            self.assertFalse(processing.done())
+
+            release_route.set()
+            await processing
+
+    async def test_turn_context_waits_for_classifier_before_starting_unknown_filler(self) -> None:
+        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+        release_route = asyncio.Event()
+        started_fillers: list[str] = []
+
+        async def resolve_after_release(*_args: object, **_kwargs: object) -> tuple[dict[str, object], str]:
+            await release_route.wait()
+            return route_for_intent("payment.summary"), "router"
+
+        class Settings:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        processor = create_stable_turn_context_processor(
+            context,
+            Settings,
+            log_event=lambda *_args, **_kwargs: None,
+            start_filler_audio=started_fillers.append,
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+
+        with patch("app.pipecat_pipeline.llm_brain.resolve_voice_route", side_effect=resolve_after_release):
+            processing = asyncio.create_task(
+                processor.process_frame(
+                    TranscriptionFrame("\u0928\u0939\u0940\u0902 \u0914\u0930 \u092e\u0947\u0930\u0947 \u092a\u0947\u092e\u0947\u0902\u091f\u094d\u0938 \u0915\u093e \u092c\u0924\u093e\u0913?", "", 0),
+                    FrameDirection.DOWNSTREAM,
+                )
+            )
+            await asyncio.sleep(0)
+
+            self.assertEqual([], started_fillers)
+            self.assertFalse(processing.done())
+
+            release_route.set()
+            await processing
+
+        self.assertEqual(["payment.summary"], started_fillers)
+
+    async def test_turn_context_does_not_start_neutral_filler_when_classifier_stays_unknown(self) -> None:
+        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+        started_fillers: list[str] = []
+        events: list[tuple[str, dict[str, object]]] = []
+
+        class Settings:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        processor = create_stable_turn_context_processor(
+            context,
+            Settings,
+            log_event=lambda event, **payload: events.append((event, payload)),
+            start_filler_audio=started_fillers.append,
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            "app.pipecat_pipeline.llm_brain.resolve_voice_route",
+            new=AsyncMock(return_value=(route_for_intent("unknown"), "classifier")),
+        ):
+            await processor.process_frame(
+                TranscriptionFrame("umm what is this thing", "", 0),
+                FrameDirection.DOWNSTREAM,
+            )
+
+        self.assertEqual([], started_fillers)
+        self.assertIn(
+            (
+                "voice_filler_skipped",
+                {
+                    "session_id": "session-1234567890",
+                    "call_id": "call-1",
+                    "intent": "unknown",
+                    "route_source": "classifier",
+                    "reason": "unknown_intent",
+                },
+            ),
+            events,
+        )
+
     async def test_voice_route_uses_ai_fallback_resolver(self) -> None:
         context = CallContext(
             session_id="session-1234567890",
@@ -164,9 +376,21 @@ class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
         ) as resolve:
             route, source = await resolve_voice_route(context, "show all my deposits")
 
-        self.assertEqual("router", source)
+        self.assertEqual("classifier", source)
         self.assertEqual("fd.summary", route["intent"])
         resolve.assert_awaited_once_with("show all my deposits", [])
+
+    async def test_voice_route_labels_deterministic_keyword_source(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+
+        route, source = await resolve_voice_route(context, "refund kab milega")
+
+        self.assertEqual("keyword", source)
+        self.assertEqual("refund.status", route["intent"])
 
     async def test_llm_response_logger_emits_full_ai_text_with_latest_transcript(self) -> None:
         from pipecat.frames.frames import LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame

@@ -15,6 +15,7 @@ type CallState = 'idle' | 'connecting' | 'connected' | 'error';
 type AgentConversationPhase = 'user' | 'thinking' | 'agent';
 
 const CONNECTING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
+const RUMIK_RING_STOP_THRESHOLD = 2;
 const RUMIK_VOICE_START_THRESHOLD = 8;
 const RUMIK_VOICE_START_FRAMES = 3;
 const USER_VOICE_START_THRESHOLD = 8;
@@ -38,8 +39,8 @@ function formatDuration(seconds: number): string {
 
 function getCallStatusLabel(callState: CallState, duration: number, error: string, ringtoneActive: boolean): string {
   if (callState === 'error') return error || 'Call failed';
-  if (callState === 'connecting') return 'Connecting...';
   if (ringtoneActive) return 'Ringing...';
+  if (callState === 'connecting') return 'Connecting...';
   if (callState === 'connected') return formatDuration(duration);
   return 'Ready to call';
 }
@@ -322,6 +323,7 @@ export function AgentCallClient() {
       const analyser = context.createAnalyser();
       let activeFrames = 0;
       let hasDetectedSpeech = false;
+      let hasStoppedRingtone = false;
 
       analyser.fftSize = 1024;
       const data = new Uint8Array(analyser.fftSize);
@@ -341,6 +343,15 @@ export function AgentCallClient() {
         let peak = 0;
         for (const value of data) {
           peak = Math.max(peak, Math.abs(value - 128));
+        }
+
+        if (!hasStoppedRingtone && peak >= RUMIK_RING_STOP_THRESHOLD) {
+          hasStoppedRingtone = true;
+          logVoiceTimingEvent('remote_audio:ringtone_stop_detected', {
+            peak,
+            threshold: RUMIK_RING_STOP_THRESHOLD,
+          });
+          stopConnectingRingtone('rumik_audio_started');
         }
 
         activeFrames = peak >= RUMIK_VOICE_START_THRESHOLD ? activeFrames + 1 : 0;
@@ -416,7 +427,6 @@ export function AgentCallClient() {
       onRemoteAudioStarted: () => {
         if (pipelineClientRef.current !== client) return;
         logVoiceTimingEvent('pipeline:remote_audio:element_started');
-        stopConnectingRingtone('remote_audio_playback_started');
       },
       onDiagnostic: (event, detail) => {
         if (pipelineClientRef.current !== client) return;

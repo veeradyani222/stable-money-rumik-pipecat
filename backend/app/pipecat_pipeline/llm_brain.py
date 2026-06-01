@@ -8,6 +8,7 @@ from typing import Any
 
 from app.agent.intent_classifier_ai import resolve_stable_turn_route_ai
 from app.db.pool import acquire
+from app.domain.policies import trace_stable_turn_route
 from app.domain.secure_links import send_secure_link_for_session
 from app.domain.session_auth import mark_demo_call_mobile_gate_in_store, mark_demo_call_verified_in_store
 from app.domain.stable_llm_policy import (
@@ -97,7 +98,39 @@ def initial_stable_instructions(context: CallContext) -> str:
 async def resolve_voice_route(context: CallContext, transcript: str) -> tuple[dict[str, Any], str]:
     if context.verified_mobile_last4 and context.pending_route:
         return context.pending_route, "pending_route"
-    return await resolve_stable_turn_route_ai(transcript, context.history), "router"
+    deterministic = trace_stable_turn_route(transcript, context.history)["route"]
+    if deterministic["intent"] != "unknown":
+        return deterministic, "keyword"
+    return await resolve_stable_turn_route_ai(transcript, context.history), "classifier"
+
+
+def _recent_model_asked_for_mobile_last_four(history: list[dict[str, str]]) -> bool:
+    for item in reversed(history):
+        if item.get("role") != "model":
+            continue
+        text = (item.get("text") or "").lower()
+        return "last four" in text or ("mobile" in text and "digit" in text)
+    return False
+
+
+def _verification_in_progress(context: CallContext) -> bool:
+    if context.call_verified:
+        return False
+    if context.verified_mobile_last4:
+        return True
+    return (
+        "verify_read_access" in context.latest_tool_names
+        and _recent_model_asked_for_mobile_last_four(context.history)
+    )
+
+
+def preliminary_filler_intent(context: CallContext, transcript: str) -> str | None:
+    if _verification_in_progress(context):
+        return None
+    if context.verified_mobile_last4 and context.pending_route:
+        return str(context.pending_route.get("intent") or "unknown")
+    route = trace_stable_turn_route(transcript, context.history)["route"]
+    return str(route.get("intent") or "unknown")
 
 
 def select_voice_tool_names(
@@ -356,7 +389,13 @@ def register_stable_tool_handlers(
         llm.register_function(declaration.name, make_handler(declaration.name))
 
 
-def create_stable_turn_context_processor(context: CallContext, settings_class: type[Any], *, log_event: StructuredLogEvent):
+def create_stable_turn_context_processor(
+    context: CallContext,
+    settings_class: type[Any],
+    *,
+    log_event: StructuredLogEvent,
+    start_filler_audio: Callable[[str], Any] | None = None,
+):
     from pipecat.frames.frames import LLMSetToolsFrame, LLMUpdateSettingsFrame, TranscriptionFrame
     from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -368,7 +407,48 @@ def create_stable_turn_context_processor(context: CallContext, settings_class: t
                 return
 
             transcript = frame.text.strip()
+            filler_intent = preliminary_filler_intent(context, transcript)
+            if start_filler_audio:
+                if filler_intent:
+                    if filler_intent != "unknown":
+                        log_event(
+                            "voice_filler_selected",
+                            session_id=context.session_id,
+                            call_id=context.call_id,
+                            intent=filler_intent,
+                            route_source="keyword",
+                        )
+                        start_filler_audio(filler_intent)
+                else:
+                    log_event(
+                        "voice_filler_selected",
+                        session_id=context.session_id,
+                        call_id=context.call_id,
+                        intent="unknown",
+                        route_source="verification",
+                    )
+                    start_filler_audio("unknown")
             route, route_source = await resolve_voice_route(context, transcript)
+            if start_filler_audio and filler_intent == "unknown":
+                resolved_filler_intent = str(route.get("intent") or "unknown")
+                if resolved_filler_intent == "unknown":
+                    log_event(
+                        "voice_filler_skipped",
+                        session_id=context.session_id,
+                        call_id=context.call_id,
+                        intent=resolved_filler_intent,
+                        route_source=route_source,
+                        reason="unknown_intent",
+                    )
+                else:
+                    log_event(
+                        "voice_filler_selected",
+                        session_id=context.session_id,
+                        call_id=context.call_id,
+                        intent=resolved_filler_intent,
+                        route_source=route_source,
+                    )
+                    start_filler_audio(resolved_filler_intent)
             tool_names, tool_scope = select_voice_tool_names(route=route, context=context, transcript=transcript)
             instructions = build_turn_instructions(route=route, tool_names=tool_names, context=context)
             context.latest_transcript = transcript

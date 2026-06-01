@@ -7,6 +7,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"true", "1", "yes", "on"}
+
+
 def load_project_env() -> None:
     backend_root = Path(__file__).resolve().parents[2]
     for env_path in (
@@ -28,6 +32,7 @@ class Settings:
     rumik_api_key: str
     rumik_base_url: str
     rumik_tts_model: str
+    enable_filler_audio: bool
     app_base_url: str
     cors_origin: str
 
@@ -35,7 +40,7 @@ class Settings:
 def get_settings() -> Settings:
     load_project_env()
     agent_model = os.getenv("OPENAI_AGENT_MODEL", "gpt-4o-mini")
-    intent_model = os.getenv("OPENAI_INTENT_MODEL") or "gpt-5-mini"
+    intent_model = os.getenv("OPENAI_INTENT_MODEL") or "gpt-4.1-mini"
     stt_model = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
     return Settings(
         database_url=os.getenv("DATABASE_URL", ""),
@@ -47,6 +52,7 @@ def get_settings() -> Settings:
         rumik_api_key=os.getenv("RUMIK_API_KEY", ""),
         rumik_base_url=os.getenv("RUMIK_BASE_URL", "https://silk-api.rumik.ai").rstrip("/"),
         rumik_tts_model=os.getenv("RUMIK_TTS_MODEL", "muga"),
+        enable_filler_audio=_env_flag("ENABLE_FILLER_AUDIO"),
         app_base_url=(
             os.getenv("NEXT_PUBLIC_APP_URL")
             or os.getenv("APP_BASE_URL")

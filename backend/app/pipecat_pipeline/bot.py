@@ -14,6 +14,7 @@ from app.domain.session_auth import (
     get_demo_call_verified_from_store,
 )
 from app.pipecat_pipeline.call_context import CallContext
+from app.pipecat_pipeline.filler_audio import create_filler_audio_player
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
     create_stable_llm_response_logger,
@@ -162,10 +163,26 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
         ),
     )
     register_stable_tool_handlers(llm, context, log_event=_log_voice_event)
+    output_transport = transport.output()
+    start_filler_audio = None
+    _log_voice_event(
+        "voice_pipeline_configured",
+        session_id=context.session_id,
+        call_id=context.call_id,
+        enable_filler_audio=settings.enable_filler_audio,
+    )
+    if settings.enable_filler_audio:
+        filler_audio_player = create_filler_audio_player(
+            output=output_transport,
+            context=context,
+            log_event=_log_voice_event,
+        )
+        start_filler_audio = filler_audio_player.start
     turn_context = create_stable_turn_context_processor(
         context,
         OpenAIResponsesLLMService.Settings,
         log_event=_log_voice_event,
+        start_filler_audio=start_filler_audio,
     )
     llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
@@ -180,7 +197,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
             llm_response_logger,
             tts,
             assistant_aggregator,
-            transport.output(),
+            output_transport,
         ]
     )
     metrics_observer = MetricsLogObserver()

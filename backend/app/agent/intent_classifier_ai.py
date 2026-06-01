@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -96,8 +97,9 @@ async def classify_intent_ai(
     if not transcript.strip() or not key:
         return {"intent": "unknown", "model_answered": False}
 
+    model = settings.openai_intent_model or settings.openai_agent_model
     body: dict[str, Any] = {
-        "model": settings.openai_intent_model or settings.openai_agent_model,
+        "model": model,
         "input": [
             {
                 "role": "user",
@@ -138,7 +140,15 @@ async def classify_intent_ai(
             }
         },
     }
+    started_at = time.monotonic()
+    logger.info("intent_classifier_started model=%s", model)
     response = await _post_responses(key, body)
+    logger.info(
+        "intent_classifier_completed model=%s elapsed_s=%s response_received=%s",
+        model,
+        round(time.monotonic() - started_at, 3),
+        bool(response),
+    )
     if not response:
         logger.warning("intent_classifier_no_response")
         return {"intent": "unknown", "model_answered": False}

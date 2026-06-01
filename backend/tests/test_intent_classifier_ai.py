@@ -7,12 +7,34 @@ from app.agent.intent_classifier_ai import classify_intent_ai, resolve_stable_tu
 
 
 class IntentClassifierAiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_classifier_logs_api_request_elapsed_time(self) -> None:
+        class Settings:
+            openai_api_key = "test-key"
+            openai_intent_model = "gpt-4.1-mini"
+            openai_agent_model = "gpt-4o-mini"
+
+        with patch("app.agent.intent_classifier_ai.get_settings", return_value=Settings()), patch(
+            "app.agent.intent_classifier_ai._post_responses",
+            new=AsyncMock(return_value={"output_text": '{"intent":"fd.summary"}'}),
+        ), patch(
+            "app.agent.intent_classifier_ai.time.monotonic",
+            side_effect=[100.0, 100.456],
+        ), self.assertLogs("app.agent.intent_classifier_ai", level="INFO") as logs:
+            result = await classify_intent_ai("show all my deposits", [])
+
+        self.assertEqual({"intent": "fd.summary", "model_answered": True}, result)
+        self.assertIn("intent_classifier_started model=gpt-4.1-mini", logs.output[0])
+        self.assertIn(
+            "intent_classifier_completed model=gpt-4.1-mini elapsed_s=0.456 response_received=True",
+            logs.output[1],
+        )
+
     async def test_classifier_request_asks_for_intent_only_without_reasoning(self) -> None:
         captured_bodies: list[dict[str, object]] = []
 
         class Settings:
             openai_api_key = "test-key"
-            openai_intent_model = "gpt-5-mini"
+            openai_intent_model = "gpt-4.1-mini"
             openai_agent_model = "gpt-4o-mini"
 
         async def fake_post(_api_key: str, body: dict[str, object]) -> dict[str, object]:
@@ -27,6 +49,7 @@ class IntentClassifierAiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual({"intent": "fd.summary", "model_answered": True}, result)
         body = captured_bodies[0]
+        self.assertEqual("gpt-4.1-mini", body["model"])
         self.assertNotIn("reasoning", body)
         self.assertEqual(1024, body["max_output_tokens"])
         self.assertIn("Do not include explanations or reasoning", str(body["instructions"]))
@@ -37,7 +60,7 @@ class IntentClassifierAiTests(unittest.IsolatedAsyncioTestCase):
     async def test_classifier_logs_incomplete_response_without_json_output(self) -> None:
         class Settings:
             openai_api_key = "test-key"
-            openai_intent_model = "gpt-5-mini"
+            openai_intent_model = "gpt-4.1-mini"
             openai_agent_model = "gpt-4o-mini"
 
         with patch("app.agent.intent_classifier_ai.get_settings", return_value=Settings()), patch(

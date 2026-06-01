@@ -10,7 +10,7 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         llm_index = source.index("            llm,")
         tts_index = source.index("            tts,")
         assistant_index = source.index("            assistant_aggregator,")
-        output_index = source.index("            transport.output(),")
+        output_index = source.index("            output_transport,")
 
         self.assertLess(llm_index, tts_index)
         self.assertLess(tts_index, assistant_index)
@@ -50,6 +50,18 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         self.assertLess(tts_index, preconnect_index)
         self.assertLess(preconnect_index, runner_index)
         self.assertIn("await rumik_preconnect_task", source)
+
+    def test_bot_queues_static_fillers_directly_to_output_during_turn_routing(self) -> None:
+        source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
+
+        self.assertIn("output_transport = transport.output()", source)
+        self.assertIn('"voice_pipeline_configured"', source)
+        self.assertIn("enable_filler_audio=settings.enable_filler_audio", source)
+        self.assertIn("if settings.enable_filler_audio", source)
+        self.assertIn("create_filler_audio_player(", source)
+        self.assertIn("output=output_transport", source)
+        self.assertIn("start_filler_audio=start_filler_audio", source)
+        self.assertIn("            output_transport,", source)
 
 
 if __name__ == "__main__":
