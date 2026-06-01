@@ -85,7 +85,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         TTSStoppedFrame,
     )
     from pipecat.services.settings import TTSSettings
-    from pipecat.services.tts_service import WebsocketTTSService
+    from pipecat.services.tts_service import TextAggregationMode, WebsocketTTSService
 
     adapter = adapter or RumikTTSService()
 
@@ -93,6 +93,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         def __init__(self):
             super().__init__(
                 sample_rate=RUMIK_SAMPLE_RATE,
+                text_aggregation_mode=TextAggregationMode.SENTENCE,
                 push_start_frame=True,
                 push_stop_frames=True,
                 settings=TTSSettings(model=adapter.settings.rumik_tts_model, voice=None, language=None),

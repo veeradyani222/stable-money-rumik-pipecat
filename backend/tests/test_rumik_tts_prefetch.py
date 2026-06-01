@@ -220,6 +220,11 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PipecatRumikWiringTests(unittest.TestCase):
+    def test_rumik_tts_explicitly_buffers_complete_sentences(self) -> None:
+        source = Path("app/pipecat_pipeline/rumik_tts.py").read_text(encoding="utf-8")
+
+        self.assertIn("text_aggregation_mode=TextAggregationMode.SENTENCE", source)
+
     def test_bot_uses_persistent_service_with_parallel_rumik_preconnect(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 

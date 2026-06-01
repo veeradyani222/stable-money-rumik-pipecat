@@ -11,6 +11,15 @@ class PipecatCloudEntrypointTests(unittest.TestCase):
         self.assertIn("from app.pipecat_pipeline.bot import bot", source)
         self.assertIn("__all__ = [\"bot\"]", source)
 
+    def test_cloud_bot_entrypoint_configures_console_logging(self) -> None:
+        source = Path("bot.py").read_text(encoding="utf-8")
+
+        configure_index = source.index("configure_runtime_logging()")
+        bot_import_index = source.index("from app.pipecat_pipeline.bot import bot")
+
+        self.assertIn("from app.core.logging import configure_runtime_logging", source)
+        self.assertLess(configure_index, bot_import_index)
+
     def test_pipeline_bot_accepts_small_webrtc_runner_arguments(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 
