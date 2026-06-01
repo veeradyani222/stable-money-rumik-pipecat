@@ -15,7 +15,7 @@ type CallState = 'idle' | 'connecting' | 'connected' | 'error';
 type AgentConversationPhase = 'user' | 'thinking' | 'agent';
 
 const CONNECTING_RINGTONE_SRC = '/assets/dragon-ringing.mp3';
-const RUMIK_RING_STOP_THRESHOLD = 2;
+const RUMIK_RING_STOP_THRESHOLD = 1;
 const RUMIK_VOICE_START_THRESHOLD = 8;
 const RUMIK_VOICE_START_FRAMES = 3;
 const USER_VOICE_START_THRESHOLD = 8;
@@ -358,7 +358,6 @@ export function AgentCallClient() {
         if (activeFrames >= RUMIK_VOICE_START_FRAMES) {
           if (!hasDetectedSpeech) {
             logVoiceTimingEvent('remote_audio:voice_detected', { peak, activeFrames });
-            stopConnectingRingtone('rumik_voice_started');
           }
           hasDetectedSpeech = true;
           setAgentPhase('agent');
@@ -427,6 +426,15 @@ export function AgentCallClient() {
       onRemoteAudioStarted: () => {
         if (pipelineClientRef.current !== client) return;
         logVoiceTimingEvent('pipeline:remote_audio:element_started');
+      },
+      onAppMessage: (message) => {
+        if (pipelineClientRef.current !== client) return;
+        if (message.type === 'voice_audio_ready' && message.phase === 'opening') {
+          logVoiceTimingEvent('pipeline:voice_audio_ready', {
+            phase: typeof message.phase === 'string' ? message.phase : undefined,
+          });
+          stopConnectingRingtone('opening_audio_ready');
+        }
       },
       onDiagnostic: (event, detail) => {
         if (pipelineClientRef.current !== client) return;

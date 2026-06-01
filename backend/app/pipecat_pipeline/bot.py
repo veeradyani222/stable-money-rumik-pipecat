@@ -45,6 +45,43 @@ def _log_voice_event(event: str, **payload: Any) -> None:
     logger.info("%s %s", event, json.dumps({"event": event, **payload}, ensure_ascii=False, default=str))
 
 
+def create_opening_audio_ready_notifier(context: CallContext, *, log_event: Any):
+    from pipecat.frames.frames import Frame, OutputTransportMessageUrgentFrame, TTSAudioRawFrame
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+    class OpeningAudioReadyNotifier(FrameProcessor):
+        def __init__(self):
+            super().__init__()
+            self._notified = False
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if (
+                direction == FrameDirection.DOWNSTREAM
+                and not self._notified
+                and isinstance(frame, TTSAudioRawFrame)
+            ):
+                self._notified = True
+                log_event(
+                    "voice_opening_audio_ready",
+                    session_id=context.session_id,
+                    call_id=context.call_id,
+                )
+                await self.push_frame(
+                    OutputTransportMessageUrgentFrame(
+                        {
+                            "type": "voice_audio_ready",
+                            "phase": "opening",
+                            "call_id": context.call_id,
+                        }
+                    ),
+                    direction,
+                )
+            await self.push_frame(frame, direction)
+
+    return OpeningAudioReadyNotifier()
+
+
 async def resolve_call_context(request_data: dict[str, Any] | None) -> CallContext:
     payload = request_data or {}
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
@@ -186,7 +223,21 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
     )
     llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
+    opening_audio_ready_notifier = create_opening_audio_ready_notifier(context, log_event=_log_voice_event)
     rumik_preconnect_task = asyncio.create_task(tts.preconnect())
+
+    def _log_rumik_preconnect_result(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        if exc := task.exception():
+            _log_voice_event(
+                "voice_rumik_preconnect_failed",
+                session_id=context.session_id,
+                call_id=context.call_id,
+                error=str(exc),
+            )
+
+    rumik_preconnect_task.add_done_callback(_log_rumik_preconnect_result)
     pipeline = Pipeline(
         [
             transport.input(),
@@ -197,6 +248,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
             llm_response_logger,
             tts,
             assistant_aggregator,
+            opening_audio_ready_notifier,
             output_transport,
         ]
     )
@@ -297,5 +349,4 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
-    await rumik_preconnect_task
     await runner.run()

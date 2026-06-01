@@ -10,11 +10,22 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         llm_index = source.index("            llm,")
         tts_index = source.index("            tts,")
         assistant_index = source.index("            assistant_aggregator,")
+        opening_notifier_index = source.index("            opening_audio_ready_notifier,")
         output_index = source.index("            output_transport,")
 
         self.assertLess(llm_index, tts_index)
         self.assertLess(tts_index, assistant_index)
-        self.assertLess(assistant_index, output_index)
+        self.assertLess(assistant_index, opening_notifier_index)
+        self.assertLess(opening_notifier_index, output_index)
+
+    def test_bot_notifies_browser_when_opening_audio_is_about_to_play(self) -> None:
+        source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
+
+        self.assertIn("def create_opening_audio_ready_notifier(", source)
+        self.assertIn("OutputTransportMessageUrgentFrame", source)
+        self.assertIn("TTSAudioRawFrame", source)
+        self.assertIn('"voice_audio_ready"', source)
+        self.assertIn('"voice_opening_audio_ready"', source)
 
     def test_bot_uses_local_vad_explicit_turn_strategies_muting_and_observers(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
@@ -40,7 +51,7 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         self.assertIn("@latency_observer.event_handler(\"on_latency_measured\")", source)
         self.assertIn("@startup_observer.event_handler(\"on_startup_timing_report\")", source)
 
-    def test_bot_starts_rumik_preconnect_before_pipeline_runs(self) -> None:
+    def test_bot_starts_rumik_preconnect_without_blocking_pipeline_start(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 
         tts_index = source.index("    tts = create_pipecat_rumik_tts_service()")
@@ -49,7 +60,8 @@ class PipecatPipelineOrderTests(unittest.TestCase):
 
         self.assertLess(tts_index, preconnect_index)
         self.assertLess(preconnect_index, runner_index)
-        self.assertIn("await rumik_preconnect_task", source)
+        self.assertIn("rumik_preconnect_task.add_done_callback", source)
+        self.assertNotIn("await rumik_preconnect_task", source)
 
     def test_bot_queues_static_fillers_directly_to_output_during_turn_routing(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")

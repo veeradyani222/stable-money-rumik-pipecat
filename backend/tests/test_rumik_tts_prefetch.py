@@ -229,7 +229,8 @@ class PipecatRumikWiringTests(unittest.TestCase):
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 
         self.assertIn("rumik_preconnect_task = asyncio.create_task(tts.preconnect())", source)
-        self.assertIn("await rumik_preconnect_task", source)
+        self.assertIn("rumik_preconnect_task.add_done_callback", source)
+        self.assertNotIn("await rumik_preconnect_task", source)
 
 
 if __name__ == "__main__":

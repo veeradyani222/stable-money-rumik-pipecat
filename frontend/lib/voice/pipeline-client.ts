@@ -9,6 +9,7 @@ export interface VoicePipelineClientEvents {
   onError?: (error: Error) => void;
   onRemoteAudioStarted?: () => void;
   onDiagnostic?: (event: string, detail?: Record<string, unknown>) => void;
+  onAppMessage?: (message: Record<string, unknown>) => void;
 }
 
 export interface VoicePipelineClientOptions extends VoicePipelineClientEvents {
@@ -41,6 +42,7 @@ export class VoicePipelineClient {
   private peer: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
+  private appDataChannel: RTCDataChannel | null = null;
   private pcId: string | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private stopped = false;
@@ -70,6 +72,12 @@ export class VoicePipelineClient {
       this.diagnostic('setup:microphone_ready');
       const peer = new RTCPeerConnection({ iceServers });
       this.peer = peer;
+      const appDataChannel = peer.createDataChannel('app');
+      this.appDataChannel = appDataChannel;
+      appDataChannel.onopen = () => this.diagnostic('app_data_channel:open');
+      appDataChannel.onclose = () => this.diagnostic('app_data_channel:closed');
+      appDataChannel.onerror = () => this.diagnostic('app_data_channel:error');
+      appDataChannel.onmessage = (event) => this.handleAppMessage(event.data);
 
       peer.onicecandidate = (event) => {
         if (this.stopped || !event.candidate) return;
@@ -165,6 +173,8 @@ export class VoicePipelineClient {
     this.stopped = true;
     this.localStream?.getTracks().forEach((track) => track.stop());
     this.localStream = null;
+    this.appDataChannel?.close();
+    this.appDataChannel = null;
     this.peer?.close();
     this.peer = null;
     this.remoteAudio?.remove();
@@ -177,6 +187,24 @@ export class VoicePipelineClient {
       ...detail,
       elapsed_ms: Math.round(performance.now() - this.startedAt),
     });
+  }
+
+  private handleAppMessage(data: unknown): void {
+    try {
+      const message = (typeof data === 'string' ? JSON.parse(data) : data) as Record<string, unknown>;
+      if (!message || typeof message !== 'object' || Array.isArray(message)) {
+        this.diagnostic('app_message:ignored', { reason: 'non_object' });
+        return;
+      }
+      this.diagnostic('app_message:received', {
+        type: typeof message.type === 'string' ? message.type : undefined,
+      });
+      this.options.onAppMessage?.(message);
+    } catch (error) {
+      this.diagnostic('app_message:parse_failed', {
+        reason: error instanceof Error ? error.message || error.name : String(error),
+      });
+    }
   }
 
   private queueOrPatchIceCandidate(candidate: RTCIceCandidateInit): void {

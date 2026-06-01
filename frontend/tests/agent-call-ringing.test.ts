@@ -38,8 +38,8 @@ test('agent call client keeps connecting calls cancellable and hides the timer u
   assert.doesNotMatch(clientSource, /callState === 'error' \? error \|\| 'Call failed' : formatDuration\(duration\)/);
 });
 
-test('agent call client keeps ringing until audible Rumik voice is detected', () => {
-  assert.match(clientSource, /const RUMIK_RING_STOP_THRESHOLD = 2;/);
+test('agent call client stops ringing when backend says opening audio is ready', () => {
+  assert.match(clientSource, /const RUMIK_RING_STOP_THRESHOLD = 1;/);
   assert.match(clientSource, /const monitorRemoteStreamForRumikVoice = useCallback/);
   assert.match(clientSource, /remoteAudioSourceRef = useRef<MediaStreamAudioSourceNode \| null>\(null\)/);
   assert.match(clientSource, /onRemoteStream: \(stream\) => \{/);
@@ -52,7 +52,8 @@ test('agent call client keeps ringing until audible Rumik voice is detected', ()
   assert.match(clientSource, /stopConnectingRingtone\('rumik_audio_started'\);/);
   assert.match(clientSource, /logVoiceTimingEvent\('remote_audio:voice_detected'/);
   assert.match(clientSource, /activeFrames = peak >= RUMIK_VOICE_START_THRESHOLD \? activeFrames \+ 1 : 0;/);
-  assert.doesNotMatch(clientSource, /onRemoteAudioStarted: \(\) => \{[\s\S]{0,220}stopConnectingRingtone\('remote_audio_playback_started'\);/);
+  assert.match(clientSource, /onAppMessage: \(message\) => \{[\s\S]{0,360}stopConnectingRingtone\('opening_audio_ready'\);/);
   assert.match(clientSource, /if \(ringtoneActive\) return 'Ringing\.\.\.'/);
-  assert.doesNotMatch(clientSource, /if \(state === 'connected'\) \{[\s\S]{0,220}stopConnectingRingtone/);
+  assert.doesNotMatch(clientSource, /if \(state === 'connected'\) \{[\s\S]{0,260}stopConnectingRingtone\('webrtc_connected'\);/);
+  assert.doesNotMatch(clientSource, /onRemoteAudioStarted: \(\) => \{[\s\S]{0,260}stopConnectingRingtone\('remote_audio_playback_started'\);/);
 });

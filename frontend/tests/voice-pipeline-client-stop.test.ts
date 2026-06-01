@@ -54,3 +54,13 @@ test('voice pipeline client reports remote audio playback diagnostics', () => {
   assert.match(pipelineSource, /this\.options\.onRemoteAudioStarted\?\.\(\);/);
   assert.match(pipelineSource, /this\.options\.onDiagnostic\?\.\('remote_audio:play:failed'/);
 });
+
+test('voice pipeline client opens a Pipecat app data channel for backend timing messages', () => {
+  assert.match(pipelineSource, /onAppMessage\?: \(message: Record<string, unknown>\) => void;/);
+  assert.match(pipelineSource, /private appDataChannel: RTCDataChannel \| null = null;/);
+  assert.match(pipelineSource, /const appDataChannel = peer\.createDataChannel\('app'\);/);
+  assert.match(pipelineSource, /appDataChannel\.onmessage = \(event\) => this\.handleAppMessage\(event\.data\);/);
+  assert.match(pipelineSource, /private handleAppMessage\(data: unknown\): void/);
+  assert.match(pipelineSource, /this\.options\.onAppMessage\?\.\(message\);/);
+  assert.match(pipelineSource, /this\.appDataChannel\?\.close\(\);/);
+});
