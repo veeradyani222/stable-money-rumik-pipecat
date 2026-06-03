@@ -54,6 +54,12 @@ class PingFailingWebSocket(FakeWebSocket):
         raise RuntimeError("ping failed")
 
 
+class ClosingWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = State.CLOSING
+
+
 class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.adapter = RumikTTSService.__new__(RumikTTSService)
@@ -143,11 +149,39 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
         self.service._websocket_refresh_idle_s = 10.0
         self.service._last_ws_activity_at = time.monotonic() - 11.0
         self.service._try_reconnect = AsyncMock(return_value=True)
+        self.service._receive_task_handler = AsyncMock()
 
         await self.service._send_or_reconnect_active_request()
 
         self.service._try_reconnect.assert_awaited()
         self.assertEqual([], self.socket.sent)
+
+    async def test_closing_socket_reconnects_before_sending_speech(self) -> None:
+        closing_socket = ClosingWebSocket()
+        self.service._websocket = closing_socket
+        self.service._active_request = SimpleNamespace(text="[neutral] Namaste.", context_id="turn-1")
+        self.service._try_reconnect = AsyncMock(return_value=True)
+        self.service._receive_task_handler = AsyncMock()
+
+        await self.service._send_or_reconnect_active_request()
+
+        self.service._try_reconnect.assert_awaited()
+        self.assertEqual([], closing_socket.sent)
+
+    async def test_sender_side_reconnect_restarts_finished_receive_task(self) -> None:
+        finished_receive_task = asyncio.create_task(asyncio.sleep(0))
+        await finished_receive_task
+        self.service._receive_task = finished_receive_task
+        self.service._receive_task_handler = AsyncMock()
+        self.service._active_request = SimpleNamespace(text="[neutral] Namaste.", context_id="turn-1")
+        self.service._last_ws_activity_at = time.monotonic() - 11.0
+        self.service._websocket_refresh_idle_s = 10.0
+        self.service._try_reconnect = AsyncMock(return_value=True)
+
+        await self.service._send_or_reconnect_active_request()
+
+        self.service._receive_task_handler.assert_called_once_with(self.service._report_error)
+        self.assertIsNot(self.service._receive_task, finished_receive_task)
 
     async def test_sentence_requests_reuse_socket_and_send_in_order(self) -> None:
         await exhaust(self.service.run_tts("Pehla sentence.", "turn-1"))

@@ -181,8 +181,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         async def _connect(self):
             await super()._connect()
             await self._connect_websocket(source="connect", prefetch=True)
-            if self._websocket and not self._receive_task:
-                self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+            self._ensure_receive_task()
             if self._websocket:
                 self._ensure_websocket_keepalive_task()
 
@@ -400,6 +399,10 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             if not self._sender_task:
                 self._sender_task = self.create_task(self._sender_loop())
 
+        def _ensure_receive_task(self):
+            if self._websocket and (not self._receive_task or self._receive_task.done()):
+                self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+
         def _ensure_context_keepalive_task(self):
             if not self._context_keepalive_task or self._context_keepalive_task.done():
                 self._context_keepalive_task = self.create_task(self._context_keepalive_loop())
@@ -476,6 +479,8 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
         def _websocket_refresh_reason_before_send(self) -> str | None:
             if not self._websocket or self._websocket.state is State.CLOSED:
                 return "missing_or_closed"
+            if self._websocket.state is not State.OPEN:
+                return "not_open"
             now = time.monotonic()
             if (
                 self._last_ws_activity_at is not None
@@ -528,6 +533,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 await self._connect()
                 if not self._websocket:
                     raise RuntimeError("Rumik WebSocket reconnect failed")
+                self._ensure_receive_task()
                 return
             if refresh_reason:
                 _log_rumik_event(
@@ -540,6 +546,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 )
                 if not await self._try_reconnect(report_error=self._report_error):
                     raise RuntimeError("Rumik WebSocket reconnect failed")
+                self._ensure_receive_task()
                 return
             try:
                 await self._send_active_request()
@@ -554,6 +561,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 )
                 if not await self._try_reconnect(report_error=self._report_error):
                     raise RuntimeError("Rumik WebSocket reconnect failed")
+                self._ensure_receive_task()
 
         async def _sender_loop(self):
             try:
