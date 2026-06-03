@@ -111,7 +111,7 @@ class PipecatLlmBrainTests(unittest.TestCase):
             dob_phase,
         )
 
-    def test_verify_read_access_dob_phase_includes_recent_split_date_parts(self) -> None:
+    def test_verify_read_access_dob_phase_uses_latest_transcript_only(self) -> None:
         dob_phase = normalize_tool_args_for_execution(
             "verify_read_access",
             {},
@@ -123,7 +123,7 @@ class PipecatLlmBrainTests(unittest.TestCase):
             verified_mobile_last4="1123",
         )
 
-        self.assertEqual({"mobile_last_4": "1123", "date_of_birth": "30. July 1993"}, dob_phase)
+        self.assertEqual({"mobile_last_4": "1123", "date_of_birth": "July 1993"}, dob_phase)
 
     def test_verify_read_access_mobile_phase_can_include_recent_split_digit_parts(self) -> None:
         mobile_phase = normalize_tool_args_for_execution(
@@ -203,6 +203,25 @@ class PipecatLlmBrainTests(unittest.TestCase):
 
         self.assertEqual("route_policy", scope)
         self.assertEqual(["verify_read_access"], tool_names)
+
+    def test_verified_unknown_route_broad_scope_excludes_reverification_tool(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+            call_verified=True,
+            verified_mobile_last4="1123",
+        )
+
+        tool_names, scope = select_voice_tool_names(
+            route={"intent": "unknown", "authTier": "Tier A", "tools": []},
+            context=context,
+            transcript="tell me my kyc",
+        )
+
+        self.assertEqual("broad_unknown_llm_scope", scope)
+        self.assertNotIn("verify_read_access", tool_names)
+        self.assertIn("get_kyc_status", tool_names)
 
 
 class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -404,6 +423,31 @@ class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("classifier", source)
         self.assertEqual("fd.summary", route["intent"])
         resolve.assert_awaited_once_with("show all my deposits", [])
+
+    async def test_voice_route_keeps_known_account_route_for_mobile_answer(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "2468"},
+            latest_route=route_for_intent("kyc.status"),
+            latest_tool_names=["verify_read_access", "get_kyc_status"],
+            history=[
+                {
+                    "role": "model",
+                    "text": "Pehle aap apne registered mobile number ke last four digits bataiyein.",
+                },
+            ],
+        )
+
+        with patch(
+            "app.pipecat_pipeline.llm_brain.resolve_stable_turn_route_ai",
+            new=AsyncMock(return_value=route_for_intent("unknown")),
+        ) as resolve:
+            route, source = await resolve_voice_route(context, "do chaar chhe aath")
+
+        self.assertEqual("verification_route", source)
+        self.assertEqual("kyc.status", route["intent"])
+        resolve.assert_not_awaited()
 
     async def test_voice_route_labels_deterministic_keyword_source(self) -> None:
         context = CallContext(

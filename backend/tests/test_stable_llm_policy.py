@@ -58,6 +58,17 @@ class StableLlmPolicyTests(unittest.TestCase):
         self.assertIn("Do not ask for phone number or date of birth again", instructions)
         self.assertIn("Allowed tools: get_payment_reconciliation_status", instructions)
 
+    def test_verified_unknown_route_does_not_force_reverification_tool(self) -> None:
+        tool_names = select_tool_names_for_request(
+            route=route_for_intent("unknown"),
+            call_verified=True,
+            verified_mobile_last4="4321",
+            transcript="tell me my kyc",
+            history=[],
+        )
+
+        self.assertEqual([], tool_names)
+
     def test_tool_declarations_keep_required_arguments(self) -> None:
         declarations = {declaration.name: declaration for declaration in stable_tool_declarations}
 

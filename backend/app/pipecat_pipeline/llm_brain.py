@@ -98,6 +98,10 @@ def initial_stable_instructions(context: CallContext) -> str:
 async def resolve_voice_route(context: CallContext, transcript: str) -> tuple[dict[str, Any], str]:
     if context.verified_mobile_last4 and context.pending_route:
         return context.pending_route, "pending_route"
+    if _verification_in_progress(context):
+        latest_route = context.latest_route or {}
+        if latest_route.get("intent") != "unknown" and "verify_read_access" in (latest_route.get("tools") or []):
+            return latest_route, "verification_route"
     deterministic = trace_stable_turn_route(transcript, context.history)["route"]
     if deterministic["intent"] != "unknown":
         return deterministic, "keyword"
@@ -154,7 +158,10 @@ def select_voice_tool_names(
     if "verify_read_access" in tool_names and route_tools:
         return [*tool_names, *route_tools], "route_policy_verify_then_account"
     if route.get("intent") == "unknown" and not tool_names:
-        return list(ALL_STABLE_TOOL_NAMES), "broad_unknown_llm_scope"
+        broad_tools = list(ALL_STABLE_TOOL_NAMES)
+        if context.call_verified:
+            broad_tools = [tool for tool in broad_tools if tool != "verify_read_access"]
+        return broad_tools, "broad_unknown_llm_scope"
     return tool_names, "route_policy"
 
 
@@ -214,11 +221,7 @@ def normalize_tool_args_for_execution(
         if len(verified_mobile) == 4:
             raw["mobile_last_4"] = verified_mobile
             if transcript and transcript != verified_mobile:
-                raw["date_of_birth"] = _verification_utterance_with_recent_user_context(
-                    transcript,
-                    history or [],
-                    max_previous_user_turns=2,
-                )
+                raw["date_of_birth"] = transcript
             else:
                 raw["date_of_birth"] = ""
             return raw

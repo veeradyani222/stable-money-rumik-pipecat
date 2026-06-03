@@ -208,6 +208,8 @@ def select_tool_names_for_request(
     policy_tools = [tool for tool in route.get("tools") or [] if tool in stable_tool_declarations_by_name]
 
     if route.get("intent") == "unknown" and len(policy_tools) == 0:
+        if call_verified:
+            return []
         if verified_mobile_last4:
             return ["verify_read_access"]
         if not call_verified and _recent_model_asked_for_mobile_last_four(history):
