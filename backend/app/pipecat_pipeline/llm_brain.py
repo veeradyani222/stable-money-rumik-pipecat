@@ -209,26 +209,28 @@ def normalize_tool_args_for_execution(
     transcript = (latest_transcript or "").strip()
 
     if canonical == "verify_read_access":
-        mobile_arg = str(raw.get("mobile_last_4") or "").strip()
-        dob_arg = str(raw.get("date_of_birth") or "").strip()
         verified_mobile = (verified_mobile_last4 or "").strip()
 
         if len(verified_mobile) == 4:
             raw["mobile_last_4"] = verified_mobile
-            if not dob_arg and transcript and transcript != verified_mobile:
+            if transcript and transcript != verified_mobile:
                 raw["date_of_birth"] = _verification_utterance_with_recent_user_context(
                     transcript,
                     history or [],
                     max_previous_user_turns=2,
                 )
+            else:
+                raw["date_of_birth"] = ""
             return raw
 
-        if not re.fullmatch(r"\d{4}", mobile_arg) and transcript:
+        if transcript:
             raw["mobile_last_4"] = _verification_utterance_with_recent_user_context(
                 transcript,
                 history or [],
                 max_previous_user_turns=2,
             )
+        else:
+            raw["mobile_last_4"] = ""
         raw["date_of_birth"] = ""
         return raw
 

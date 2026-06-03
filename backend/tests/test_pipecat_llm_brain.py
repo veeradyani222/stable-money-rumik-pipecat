@@ -86,6 +86,31 @@ class PipecatLlmBrainTests(unittest.TestCase):
             dob_phase,
         )
 
+    def test_verify_read_access_mobile_phase_uses_transcript_over_decoded_digits(self) -> None:
+        mobile_phase = normalize_tool_args_for_execution(
+            "verify_read_access",
+            {"mobile_last_4": "2688"},
+            latest_transcript="دو چار چھ آٹھ",
+            history=[],
+            verified_mobile_last4=None,
+        )
+
+        self.assertEqual({"mobile_last_4": "دو چار چھ آٹھ", "date_of_birth": ""}, mobile_phase)
+
+    def test_verify_read_access_dob_phase_uses_transcript_over_decoded_date(self) -> None:
+        dob_phase = normalize_tool_args_for_execution(
+            "verify_read_access",
+            {"mobile_last_4": "2468", "date_of_birth": "1990-12-06"},
+            latest_transcript="fifth December nineteen ninety",
+            history=[],
+            verified_mobile_last4="2468",
+        )
+
+        self.assertEqual(
+            {"mobile_last_4": "2468", "date_of_birth": "fifth December nineteen ninety"},
+            dob_phase,
+        )
+
     def test_verify_read_access_dob_phase_includes_recent_split_date_parts(self) -> None:
         dob_phase = normalize_tool_args_for_execution(
             "verify_read_access",
