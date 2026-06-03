@@ -51,11 +51,39 @@ class IntentClassifierAiTests(unittest.IsolatedAsyncioTestCase):
         body = captured_bodies[0]
         self.assertEqual("gpt-4.1-mini", body["model"])
         self.assertNotIn("reasoning", body)
-        self.assertEqual(1024, body["max_output_tokens"])
+        self.assertEqual(32, body["max_output_tokens"])
         self.assertIn("Do not include explanations or reasoning", str(body["instructions"]))
         schema = body["text"]["format"]["schema"]  # type: ignore[index]
         self.assertEqual(["intent"], list(schema["properties"]))  # type: ignore[index]
         self.assertEqual(["intent"], schema["required"])  # type: ignore[index]
+
+    async def test_classifier_output_tokens_ramp_by_user_turn(self) -> None:
+        captured_bodies: list[dict[str, object]] = []
+
+        class Settings:
+            openai_api_key = "test-key"
+            openai_intent_model = "gpt-4.1-mini"
+            openai_agent_model = "gpt-4o-mini"
+
+        async def fake_post(_api_key: str, body: dict[str, object]) -> dict[str, object]:
+            captured_bodies.append(body)
+            return {"output_text": '{"intent":"fd.summary"}'}
+
+        with patch("app.agent.intent_classifier_ai.get_settings", return_value=Settings()), patch(
+            "app.agent.intent_classifier_ai._post_responses",
+            side_effect=fake_post,
+        ):
+            for previous_user_turns in range(12):
+                history: list[dict[str, str]] = []
+                for turn in range(previous_user_turns):
+                    history.append({"role": "user", "text": f"user turn {turn}"})
+                    history.append({"role": "model", "text": f"model turn {turn}"})
+                await classify_intent_ai("show all my deposits", history)
+
+        self.assertEqual(
+            [32, 64, 96, 128, 256, 384, 512, 640, 768, 896, 1024, 1024],
+            [body["max_output_tokens"] for body in captured_bodies],
+        )
 
     async def test_classifier_logs_incomplete_response_without_json_output(self) -> None:
         class Settings:

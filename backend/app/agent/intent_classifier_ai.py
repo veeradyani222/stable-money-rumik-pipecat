@@ -13,6 +13,10 @@ from app.domain.policies import STABLE_INTENT_POLICIES, route_for_intent, trace_
 
 INTENT_IDS = [*STABLE_INTENT_POLICIES, "unknown"]
 CLASSIFIER_HISTORY_LIMIT = 4
+CLASSIFIER_EARLY_TURN_LIMIT = 4
+CLASSIFIER_EARLY_TOKEN_STEP = 32
+CLASSIFIER_LATE_TOKEN_STEP = 128
+CLASSIFIER_MAX_OUTPUT_TOKENS = 1024
 logger = logging.getLogger(__name__)
 
 INTENT_CLASSIFICATION_GUIDE = {
@@ -70,6 +74,18 @@ def _parse_intent(text: str) -> dict[str, Any] | None:
     return {"intent": intent, "model_answered": True}
 
 
+def _classifier_max_output_tokens(history: list[dict[str, str]]) -> int:
+    turn_number = 1 + sum(1 for item in history if item.get("role") == "user")
+    if turn_number <= CLASSIFIER_EARLY_TURN_LIMIT:
+        token_budget = turn_number * CLASSIFIER_EARLY_TOKEN_STEP
+    else:
+        token_budget = (
+            CLASSIFIER_EARLY_TURN_LIMIT * CLASSIFIER_EARLY_TOKEN_STEP
+            + (turn_number - CLASSIFIER_EARLY_TURN_LIMIT) * CLASSIFIER_LATE_TOKEN_STEP
+        )
+    return min(token_budget, CLASSIFIER_MAX_OUTPUT_TOKENS)
+
+
 async def _post_responses(api_key: str, body: dict[str, Any]) -> dict[str, Any] | None:
     try:
         client = get_shared_http_client()
@@ -123,7 +139,7 @@ async def classify_intent_ai(
                 "Return only the required JSON field. Do not include explanations or reasoning.",
             ]
         ),
-        "max_output_tokens": 1024,
+        "max_output_tokens": _classifier_max_output_tokens(history),
         "stream": False,
         "prompt_cache_key": "stable-intent-classifier-v2",
         "text": {
