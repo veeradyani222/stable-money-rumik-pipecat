@@ -164,7 +164,7 @@ class PipecatLlmBrainTests(unittest.TestCase):
         self.assertIn("get_payment_reconciliation_status", llm.registered)
         self.assertIn("send_secure_link", llm.registered)
 
-    def test_voice_tool_selection_keeps_account_tool_available_after_verification(self) -> None:
+    def test_voice_tool_selection_hides_account_tool_until_verification_completes(self) -> None:
         context = CallContext(
             session_id="session-1234567890",
             call_id="call-1",
@@ -178,8 +178,26 @@ class PipecatLlmBrainTests(unittest.TestCase):
             transcript="my payment failed",
         )
 
-        self.assertEqual("route_policy_verify_then_account", scope)
-        self.assertEqual(["verify_read_access", "get_payment_reconciliation_status"], tool_names)
+        self.assertEqual("route_policy", scope)
+        self.assertEqual(["verify_read_access"], tool_names)
+
+    def test_voice_tool_selection_exposes_account_tool_after_verification_completes(self) -> None:
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "9876"},
+            call_verified=True,
+            verified_mobile_last4="9876",
+        )
+
+        tool_names, scope = select_voice_tool_names(
+            route=route_for_intent("payment.failed"),
+            context=context,
+            transcript="my payment failed",
+        )
+
+        self.assertEqual("route_policy", scope)
+        self.assertEqual(["get_payment_reconciliation_status"], tool_names)
 
     def test_voice_tool_selection_keeps_verification_tool_for_multilingual_last_four_answer(self) -> None:
         context = CallContext(
@@ -517,7 +535,7 @@ class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
             verified_mobile_last4="1123",
             latest_transcript="30th July, 1993",
             latest_route=route_for_intent("fd.summary"),
-            latest_tool_names=["verify_read_access", "get_fd_summary"],
+            latest_tool_names=["verify_read_access"],
         )
         results: list[dict[str, object]] = []
         events: list[tuple[str, dict[str, object]]] = []

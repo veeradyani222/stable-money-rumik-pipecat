@@ -252,11 +252,12 @@ async def verify_read_access(
     verified_mobile_last4: str | None = None,
 ) -> dict[str, Any]:
     gate = digits_only(verified_mobile_last4)[-4:]
+    mobile_verified_by_gate = gate == persona["mobile_last_4"]
     mobile_text = str(args.get("mobile_last_4") or "").strip()
     dob_text = str(args.get("date_of_birth") or "").strip()
-    if gate == persona["mobile_last_4"] and dob_text:
+    if mobile_verified_by_gate and dob_text:
         mobile_text = persona["mobile_last_4"]
-    if not mobile_text and gate == persona["mobile_last_4"]:
+    if not mobile_text and mobile_verified_by_gate:
         mobile_text = gate
     if not mobile_text:
         return _result(
@@ -267,7 +268,9 @@ async def verify_read_access(
 
     settings = get_settings()
     ai_enabled = bool(settings.openai_api_key) and os.getenv("STABLE_DISABLE_AI_MOBILE") != "1"
-    if ai_enabled:
+    if mobile_verified_by_gate:
+        mobile_ok = True
+    elif ai_enabled:
         ai = await match_mobile_last_four_ai(mobile_text, persona["mobile_last_4"], api_key=settings.openai_api_key)
         mobile_ok = ai.get("verdict") == "match"
         if ai.get("verdict") == "unclear":

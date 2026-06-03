@@ -155,7 +155,7 @@ def select_voice_tool_names(
         for tool in (route.get("tools") or [])
         if tool in stable_tool_declarations_by_name and tool not in tool_names
     ]
-    if "verify_read_access" in tool_names and route_tools:
+    if context.call_verified and "verify_read_access" in tool_names and route_tools:
         return [*tool_names, *route_tools], "route_policy_verify_then_account"
     if route.get("intent") == "unknown" and not tool_names:
         broad_tools = list(ALL_STABLE_TOOL_NAMES)

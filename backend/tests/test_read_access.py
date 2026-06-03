@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.agent.read_access import dob_matches, verify_read_access
 
@@ -47,6 +47,37 @@ class ReadAccessDobTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(no_match["ok"])
         self.assertTrue(match["ok"])
+
+    async def test_verified_mobile_gate_skips_mobile_ai_during_dob_phase(self) -> None:
+        persona = {
+            "customer_id": "cust-1",
+            "name": "Demo",
+            "mobile_last_4": "2468",
+            "date_of_birth": "1990-12-05",
+        }
+
+        class Settings:
+            openai_api_key = "test-key"
+
+        mobile_ai = AsyncMock(return_value={"verdict": "no_match", "extracted_last_four": "2468", "model_answered": True})
+        dob_ai = AsyncMock(return_value={"verdict": "match", "model_answered": True})
+
+        with patch.dict("os.environ", {}, clear=True), patch("app.agent.read_access.get_settings", return_value=Settings()), patch(
+            "app.agent.read_access.match_mobile_last_four_ai",
+            side_effect=mobile_ai,
+        ), patch(
+            "app.agent.read_access.match_dob_ai",
+            side_effect=dob_ai,
+        ):
+            result = await verify_read_access(
+                persona,
+                {"mobile_last_4": "2468", "date_of_birth": "5 December 1990"},
+                verified_mobile_last4="2468",
+            )
+
+        self.assertTrue(result["ok"])
+        mobile_ai.assert_not_awaited()
+        dob_ai.assert_awaited_once()
 
 
 class ReadAccessMobileTests(unittest.IsolatedAsyncioTestCase):
