@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,14 +17,28 @@ async def exhaust(generator):
     return [frame async for frame in generator]
 
 
+async def wait_for_condition(condition, *, attempts: int = 10) -> None:
+    for _ in range(attempts):
+        if condition():
+            return
+        await asyncio.sleep(0)
+
+
 class FakeWebSocket:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.pings = 0
         self.closed = False
         self.state = State.OPEN
 
     async def send(self, message: str) -> None:
         self.sent.append(message)
+
+    async def ping(self):
+        self.pings += 1
+        done = asyncio.get_running_loop().create_future()
+        done.set_result(0.001)
+        return done
 
     async def close(self) -> None:
         self.closed = True
@@ -32,6 +47,11 @@ class FakeWebSocket:
 class AlreadyClosedWebSocket(FakeWebSocket):
     async def send(self, message: str) -> None:
         raise RuntimeError("socket already closed")
+
+
+class PingFailingWebSocket(FakeWebSocket):
+    async def ping(self):
+        raise RuntimeError("ping failed")
 
 
 class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +117,37 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
             await self.service.preconnect()
 
         self.service.create_task.assert_not_called()
+
+    async def test_websocket_keepalive_pings_idle_open_socket(self) -> None:
+        self.service._websocket_keepalive_interval_s = 0
+        self.service._websocket_keepalive_timeout_s = 0.1
+
+        self.service._ensure_websocket_keepalive_task()
+        await wait_for_condition(lambda: self.socket.pings >= 1)
+
+        self.assertGreaterEqual(self.socket.pings, 1)
+
+    async def test_websocket_keepalive_reconnects_when_ping_fails(self) -> None:
+        self.service._websocket = PingFailingWebSocket()
+        self.service._websocket_keepalive_interval_s = 0
+        self.service._websocket_keepalive_timeout_s = 0.1
+        self.service._try_reconnect = AsyncMock(return_value=True)
+
+        self.service._ensure_websocket_keepalive_task()
+        await wait_for_condition(lambda: self.service._try_reconnect.await_count >= 1)
+
+        self.service._try_reconnect.assert_awaited()
+
+    async def test_stale_socket_reconnects_before_sending_speech(self) -> None:
+        self.service._active_request = SimpleNamespace(text="[neutral] Namaste.", context_id="turn-1")
+        self.service._websocket_refresh_idle_s = 10.0
+        self.service._last_ws_activity_at = time.monotonic() - 11.0
+        self.service._try_reconnect = AsyncMock(return_value=True)
+
+        await self.service._send_or_reconnect_active_request()
+
+        self.service._try_reconnect.assert_awaited()
+        self.assertEqual([], self.socket.sent)
 
     async def test_sentence_requests_reuse_socket_and_send_in_order(self) -> None:
         await exhaust(self.service.run_tts("Pehla sentence.", "turn-1"))

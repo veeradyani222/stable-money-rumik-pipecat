@@ -101,7 +101,12 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             self._receive_task: asyncio.Task | None = None
             self._sender_task: asyncio.Task | None = None
             self._context_keepalive_task: asyncio.Task | None = None
+            self._websocket_keepalive_task: asyncio.Task | None = None
             self._context_keepalive_interval_s = 1.0
+            self._websocket_keepalive_interval_s = 25.0
+            self._websocket_keepalive_timeout_s = 5.0
+            self._websocket_refresh_idle_s = 45.0
+            self._websocket_refresh_connection_age_s = 90.0
             self._request_queue: asyncio.Queue[_RumikTTSRequest] = asyncio.Queue()
             self._active_request: _RumikTTSRequest | None = None
             self._active_done = asyncio.Event()
@@ -178,6 +183,8 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             await self._connect_websocket(source="connect", prefetch=True)
             if self._websocket and not self._receive_task:
                 self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+            if self._websocket:
+                self._ensure_websocket_keepalive_task()
 
         async def _disconnect(self):
             await super()._disconnect()
@@ -295,6 +302,9 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             if self._context_keepalive_task:
                 await self.cancel_task(self._context_keepalive_task)
                 self._context_keepalive_task = None
+            if self._websocket_keepalive_task:
+                await self.cancel_task(self._websocket_keepalive_task)
+                self._websocket_keepalive_task = None
             if self._session_prefetch_task:
                 self._session_prefetch_task.cancel()
                 self._session_prefetch_task = None
@@ -394,6 +404,10 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             if not self._context_keepalive_task or self._context_keepalive_task.done():
                 self._context_keepalive_task = self.create_task(self._context_keepalive_loop())
 
+        def _ensure_websocket_keepalive_task(self):
+            if not self._websocket_keepalive_task or self._websocket_keepalive_task.done():
+                self._websocket_keepalive_task = self.create_task(self._websocket_keepalive_loop())
+
         async def _context_keepalive_loop(self):
             try:
                 # Reconnect and synthesis can exceed Pipecat's idle-context timeout.
@@ -406,6 +420,74 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             finally:
                 if self._context_keepalive_task is asyncio.current_task():
                     self._context_keepalive_task = None
+
+        async def _websocket_keepalive_loop(self):
+            try:
+                while True:
+                    await asyncio.sleep(self._websocket_keepalive_interval_s)
+                    if self._disconnecting or self._active_request:
+                        continue
+                    if not self._websocket or self._websocket.state is State.CLOSED:
+                        await self._reconnect_websocket_from_keepalive("missing_or_closed")
+                        continue
+                    try:
+                        pong_waiter = await self._get_websocket().ping()
+                        latency = await asyncio.wait_for(
+                            pong_waiter,
+                            timeout=self._websocket_keepalive_timeout_s,
+                        )
+                        self._last_ws_activity_at = time.monotonic()
+                        _log_rumik_event(
+                            "rumik_ws_keepalive_pong",
+                            latency_s=round(float(latency), 3),
+                            ws_state=self._websocket_state_name(),
+                            idle_age_s=self._idle_age_s(),
+                            connection_age_s=self._connection_age_s(),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        _log_rumik_event(
+                            "rumik_ws_keepalive_failed",
+                            error=str(exc),
+                            ws_state=self._websocket_state_name(),
+                            idle_age_s=self._idle_age_s(),
+                            connection_age_s=self._connection_age_s(),
+                        )
+                        await self._reconnect_websocket_from_keepalive("keepalive_failed")
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if self._websocket_keepalive_task is asyncio.current_task():
+                    self._websocket_keepalive_task = None
+
+        async def _reconnect_websocket_from_keepalive(self, reason: str) -> None:
+            if self._disconnecting:
+                return
+            _log_rumik_event(
+                "rumik_ws_keepalive_reconnect",
+                reason=reason,
+                ws_state=self._websocket_state_name(),
+                idle_age_s=self._idle_age_s(),
+                connection_age_s=self._connection_age_s(),
+            )
+            await self._try_reconnect(report_error=self._report_error)
+
+        def _websocket_refresh_reason_before_send(self) -> str | None:
+            if not self._websocket or self._websocket.state is State.CLOSED:
+                return "missing_or_closed"
+            now = time.monotonic()
+            if (
+                self._last_ws_activity_at is not None
+                and now - self._last_ws_activity_at >= self._websocket_refresh_idle_s
+            ):
+                return "idle_too_old"
+            if (
+                self._last_ws_connected_at is not None
+                and now - self._last_ws_connected_at >= self._websocket_refresh_connection_age_s
+            ):
+                return "connection_too_old"
+            return None
 
         async def _send_active_request(self):
             if not self._active_request:
@@ -433,10 +515,11 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
             )
 
         async def _send_or_reconnect_active_request(self):
-            if not self._websocket or self._websocket.state is State.CLOSED:
+            refresh_reason = self._websocket_refresh_reason_before_send()
+            if refresh_reason == "missing_or_closed":
                 _log_rumik_event(
                     "rumik_reconnect_before_send",
-                    reason="missing_or_closed",
+                    reason=refresh_reason,
                     ws_state=self._websocket_state_name(),
                     idle_age_s=self._idle_age_s(),
                     connection_age_s=self._connection_age_s(),
@@ -444,6 +527,18 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                 )
                 await self._connect()
                 if not self._websocket:
+                    raise RuntimeError("Rumik WebSocket reconnect failed")
+                return
+            if refresh_reason:
+                _log_rumik_event(
+                    "rumik_reconnect_before_send",
+                    reason=refresh_reason,
+                    ws_state=self._websocket_state_name(),
+                    idle_age_s=self._idle_age_s(),
+                    connection_age_s=self._connection_age_s(),
+                    active_request=bool(self._active_request),
+                )
+                if not await self._try_reconnect(report_error=self._report_error):
                     raise RuntimeError("Rumik WebSocket reconnect failed")
                 return
             try:
