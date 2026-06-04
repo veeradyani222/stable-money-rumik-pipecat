@@ -204,6 +204,28 @@ class PersistentPipecatRumikTTSTests(unittest.IsolatedAsyncioTestCase):
             [json.loads(message) for message in self.socket.sent],
         )
 
+    async def test_tts_normalizes_speech_format_without_rewriting_response(self) -> None:
+        llm_text = (
+            "[neutral] Bank: Unity Small Finance Bank; Amount: ₹10,000; "
+            "Status: BOOKED; Tenure: 12 months / 1 year."
+        )
+
+        await exhaust(self.service.run_tts(llm_text, "turn-1"))
+        await asyncio.sleep(0)
+
+        self.assertEqual(
+            [
+                {
+                    "text": (
+                        "[neutral] Bank Unity Small Finance Bank Amount rupees ten thousand "
+                        "Status BOOKED Tenure twelve months or one year."
+                    ),
+                    "speaker_id": 0,
+                }
+            ],
+            [json.loads(message) for message in self.socket.sent],
+        )
+
     async def test_reconnect_replays_active_sentence(self) -> None:
         self.service._websocket = None
         self.service._call_event_handler = AsyncMock()

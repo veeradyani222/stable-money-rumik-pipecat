@@ -45,7 +45,7 @@ class RumikTTSService:
     async def create_session(self, text: str) -> dict[str, Any]:
         if not self.settings.rumik_api_key:
             raise RuntimeError("RUMIK_API_KEY is required for Rumik TTS")
-        rumik_text = normalize_rumik_text(text)[:2000]
+        rumik_text = normalize_rumik_text(text)
         client = get_shared_http_client()
         started_at = time.monotonic()
         _log_rumik_event(
@@ -730,7 +730,7 @@ def create_pipecat_rumik_tts_service(adapter: RumikTTSService | None = None):
                     await self._connect()
                 if not self._websocket:
                     raise RuntimeError("Rumik WebSocket is not connected")
-                rumik_text = normalize_rumik_text(text)[:2000]
+                rumik_text = normalize_rumik_text(text)
                 request = _RumikTTSRequest(text=rumik_text, context_id=context_id)
                 self._pending_by_context[context_id] = self._pending_by_context.get(context_id, 0) + 1
                 await self._request_queue.put(request)

@@ -147,36 +147,6 @@ def _normalize_date(match: re.Match[str]) -> str:
     return f"{ORDINALS.get(day, _below_hundred(day))} {month} {_year_to_words(year)}"
 
 
-def _rewrite_fd_details(text: str) -> str:
-    label_pattern = re.compile(r"\b(Bank|Amount|Status|Tenure|Booking date|Maturity date)\s*:", re.I)
-    matches = list(label_pattern.finditer(text))
-    if len(matches) < 2:
-        return text
-    fields: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        raw = text[start:end]
-        raw = re.split(r"\b(?:Confirmation|Agar|Please|Iske|Usually)\b", raw, maxsplit=1)[0]
-        fields[match.group(1).lower()] = re.sub(r"\s+", " ", raw).strip()
-    if not fields:
-        return text
-    before = text[: matches[0].start()]
-    sentences = [before.strip()] if before.strip() else []
-    sentences.append("Aapki FD details ye hain.")
-    if fields.get("bank") and fields.get("amount"):
-        sentences.append(f"FD {fields['bank']} mein {fields['amount']} ki hai.")
-    if fields.get("status"):
-        sentences.append(f"Status {fields['status'].lower()} hai.")
-    if fields.get("tenure"):
-        sentences.append(f"Tenure {fields['tenure']} hai.")
-    if fields.get("booking date"):
-        sentences.append(f"Booking date {fields['booking date']} hai.")
-    if fields.get("maturity date"):
-        sentences.append(f"Maturity date {fields['maturity date']} hai.")
-    return " ".join(sentences)
-
-
 def _normalize_body(text: str) -> str:
     date_pattern = re.compile(
         r"\b([0-9]{1,2})(?:st|nd|rd|th)?\s+"
@@ -184,13 +154,35 @@ def _normalize_body(text: str) -> str:
         r"([0-9]{4})\b",
         re.I,
     )
-    text = _rewrite_fd_details(text)
-    text = re.sub(r"(?:₹\s*([0-9][0-9,]*)|\b(?:rs\.?|inr|rupees?)\s*([0-9][0-9,]*))", lambda m: f"rupees {_amount_to_words(m.group(1) or m.group(2) or '')}", text, flags=re.I)
-    text = re.sub(r"\b([0-9][0-9,]*)\s*(?:rs\.?|inr|rupees?)\b", lambda m: f"rupees {_amount_to_words(m.group(1))}", text, flags=re.I)
+    text = re.sub(
+        r"(?:₹\s*([0-9][0-9,]*)|\b(?:rs\.?|inr|rupees?)\s*([0-9][0-9,]*))",
+        lambda match: f"rupees {_amount_to_words(match.group(1) or match.group(2) or '')}",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\b([0-9][0-9,]*)\s*(?:rs\.?|inr|rupees?)\b",
+        lambda match: f"rupees {_amount_to_words(match.group(1))}",
+        text,
+        flags=re.I,
+    )
     text = date_pattern.sub(_normalize_date, text)
-    text = re.sub(r"\b([0-9]{1,3})\s+(se|to)\s+([0-9]{1,3})\b", lambda m: f"{_below_thousand(int(m.group(1)))} {m.group(2).lower()} {_below_thousand(int(m.group(3)))}", text, flags=re.I)
-    text = re.sub(r"\b([0-9]{1,3})\s+(months?|hours?|days?|years?|working hours?)\b", lambda m: f"{_below_thousand(int(m.group(1)))} {m.group(2).lower()}", text, flags=re.I)
-    text = re.sub(r"\b[0-9][0-9,]*\b", lambda m: _normalize_number_token(m.group(0)), text)
+    text = re.sub(
+        r"\b([0-9]{1,3})\s+(se|to)\s+([0-9]{1,3})\b",
+        lambda match: (
+            f"{_below_thousand(int(match.group(1)))} "
+            f"{match.group(2).lower()} {_below_thousand(int(match.group(3)))}"
+        ),
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\b([0-9]{1,3})\s+(months?|hours?|days?|years?|working hours?)\b",
+        lambda match: f"{_below_thousand(int(match.group(1)))} {match.group(2).lower()}",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\b[0-9][0-9,]*\b", lambda match: _normalize_number_token(match.group(0)), text)
     text = re.sub(r"[*]+", " ", text)
     text = re.sub(r"[\\/]+", " or ", text)
     text = re.sub(r"[\u2010-\u2015-]+", " ", text)
@@ -226,4 +218,3 @@ def normalize_rumik_text(text: str, fallback_tone: str = "neutral") -> str:
     else:
         normalized = _normalize_body(normalized)
     return re.sub(r"\s+", " ", normalized).strip()
-
