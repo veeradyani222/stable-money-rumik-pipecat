@@ -18,6 +18,7 @@ from app.pipecat_pipeline.filler_audio import create_filler_audio_player
 from app.pipecat_pipeline.frame_trace import FrameTraceLogger, create_frame_trace_processor
 from app.pipecat_pipeline.llm_brain import (
     build_pipecat_tools_schema,
+    create_intent_classifier_processor,
     create_stable_llm_response_logger,
     create_stable_turn_context_processor,
     initial_stable_instructions,
@@ -222,6 +223,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
         log_event=_log_voice_event,
         start_filler_audio=start_filler_audio,
     )
+    intent_classifier = create_intent_classifier_processor(context, log_event=_log_voice_event)
     llm_response_logger = create_stable_llm_response_logger(context, log_event=_log_voice_event)
     tts = create_pipecat_rumik_tts_service()
     opening_audio_ready_notifier = create_opening_audio_ready_notifier(context, log_event=_log_voice_event)
@@ -245,6 +247,7 @@ async def run_pipeline(transport: Any, context: CallContext) -> None:
         [
             transport.input(),
             stt,
+            intent_classifier,
             turn_context,
             user_aggregator,
             llm,

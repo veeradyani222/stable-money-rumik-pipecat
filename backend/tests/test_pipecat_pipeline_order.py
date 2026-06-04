@@ -18,6 +18,16 @@ class PipecatPipelineOrderTests(unittest.TestCase):
         self.assertLess(assistant_index, opening_notifier_index)
         self.assertLess(opening_notifier_index, output_index)
 
+    def test_intent_classifier_is_a_dedicated_processor_between_stt_and_turn_context(self) -> None:
+        source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
+        stt_index = source.index("            stt,")
+        classifier_index = source.index("            intent_classifier,")
+        turn_context_index = source.index("            turn_context,")
+
+        self.assertLess(stt_index, classifier_index)
+        self.assertLess(classifier_index, turn_context_index)
+        self.assertIn("intent_classifier = create_intent_classifier_processor(", source)
+
     def test_bot_notifies_browser_when_opening_audio_is_about_to_play(self) -> None:
         source = Path("app/pipecat_pipeline/bot.py").read_text(encoding="utf-8")
 

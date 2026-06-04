@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 
 from app.pipecat_pipeline.call_context import CallContext
 from app.pipecat_pipeline.llm_brain import (
+    ClassifiedTranscriptionFrame,
     build_pipecat_tools_schema,
+    create_intent_classifier_processor,
     create_stable_llm_response_logger,
     create_stable_turn_context_processor,
     normalize_tool_args_for_execution,
@@ -243,6 +245,81 @@ class PipecatLlmBrainTests(unittest.TestCase):
 
 
 class PipecatLlmBrainAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intent_classifier_processor_emits_classified_transcription_with_metrics(self) -> None:
+        from pipecat.frames.frames import TranscriptionFrame
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+        resolved = route_for_intent("fd.summary")
+        events: list[tuple[str, dict[str, object]]] = []
+        processor = create_intent_classifier_processor(
+            context,
+            log_event=lambda event, **payload: events.append((event, payload)),
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+        processor.start_processing_metrics = AsyncMock()  # type: ignore[method-assign]
+        processor.stop_processing_metrics = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            "app.pipecat_pipeline.llm_brain.resolve_voice_route",
+            new=AsyncMock(return_value=(resolved, "classifier")),
+        ) as resolve:
+            await processor.process_frame(
+                TranscriptionFrame("show all my deposits", "user-1", "source-ts", finalized=True),
+                FrameDirection.DOWNSTREAM,
+            )
+
+        resolve.assert_awaited_once_with(context, "show all my deposits")
+        processor.start_processing_metrics.assert_awaited_once()
+        processor.stop_processing_metrics.assert_awaited_once()
+        classified = processor.push_frame.await_args.args[0]
+        self.assertIsInstance(classified, ClassifiedTranscriptionFrame)
+        self.assertEqual("show all my deposits", classified.text)
+        self.assertEqual("user-1", classified.user_id)
+        self.assertEqual("source-ts", classified.timestamp)
+        self.assertTrue(classified.finalized)
+        self.assertEqual("fd.summary", classified.route["intent"])
+        self.assertEqual("classifier", classified.route_source)
+        self.assertEqual("voice_intent_classified", events[0][0])
+
+    async def test_turn_context_uses_preclassified_route_without_resolving_again(self) -> None:
+        from pipecat.processors.frame_processor import FrameDirection
+
+        context = CallContext(
+            session_id="session-1234567890",
+            call_id="call-1",
+            persona={"mobile_last_4": "1123"},
+        )
+
+        class Settings:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+        processor = create_stable_turn_context_processor(
+            context,
+            Settings,
+            log_event=lambda *_args, **_kwargs: None,
+        )
+        processor.push_frame = AsyncMock()  # type: ignore[method-assign]
+        classified = ClassifiedTranscriptionFrame(
+            "show all my deposits",
+            "user-1",
+            "source-ts",
+            route=route_for_intent("fd.summary"),
+            route_source="classifier",
+            finalized=True,
+        )
+
+        with patch("app.pipecat_pipeline.llm_brain.resolve_voice_route", new=AsyncMock()) as resolve:
+            await processor.process_frame(classified, FrameDirection.DOWNSTREAM)
+
+        resolve.assert_not_awaited()
+        self.assertEqual("fd.summary", context.latest_route["intent"])
+
     async def test_turn_context_starts_neutral_filler_for_verification_answer(self) -> None:
         from pipecat.frames.frames import TranscriptionFrame
         from pipecat.processors.frame_processor import FrameDirection

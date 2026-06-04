@@ -1,46 +1,14 @@
-No changes made. git status --short is clean.
+Findings:
 
-Findings
-
-The “reconnecting” was Rumik TTS WebSocket, not the main call route.
-At 11:04:40, logs say PipecatRumikTTSService#0 connection closed by server, then it reconnected successfully on attempt one at 11:04:41. So that was a TTS socket recovery event, not the reason KYC/payments failed.
-
-The prerecorded filler did not fire because the route became unknown.
-ENABLE_FILLER_AUDIO=true, so it was enabled. But for your KYC/payment utterances, deterministic routing missed the exact Hindi phrases, then the AI classifier timed out after ~10s with response_received=False. Code then logs voice_filler_skipped with reason="unknown_intent" instead of playing a topic filler.
-
-Relevant code:
-llm_brain.py (line 432) skips filler when resolved intent is still unknown.
-intent_classifier_ai.py (line 80) has the 10s classifier timeout.
-intent_classifier_ai.py (line 153) turns no response into unknown.
 
 The Hindi keyword coverage is too narrow.
 Your KYC phrase was like केवाईसी के बारे में बताओ, but the current KYC status keywords are mainly kyc status, केवाईसी का स्टेटस, केवाईसी अप्रूव, etc.
 Your payment phrase used पेमेंट्स का बताओ / मेरे पेमेंट्स, but current payment keywords include पेमेंट्स के बारे, पेमेंट के बारे, मेरे पेमेंट singular, etc.
 Relevant code:
 policies.py (line 87) KYC keywords.
-policies.py (line 121) payment summary keywords.
+policies.py (line 121) payment summary keywords
 
-The “main KYC dekhti hoon” line was misleading because no KYC tool actually ran.
-After mobile/DOB, verification succeeded, but the route was still unknown, so _post_verification_tool_name() had no get_kyc_status route tool to run. The log confirms tool_calls only had verify_read_access, not get_kyc_status.
-
-After verification, unknown route still selects only verify_read_access.
-This is why asking again still didn’t answer. In select_tool_names_for_request, if route is unknown and verified_mobile_last4 exists, it returns ["verify_read_access"] before considering call_verified. So the verified user can still get stuck with only verification available.
-
-Relevant code:
-stable_llm_policy.py (line 210)
-
-Net: it’s a routing failure cascade: missing Hindi keyword hit -> classifier timeout -> unknown route -> filler skipped -> verification succeeds but original route is still unknown -> no KYC/payment tool available.
-
-11:17 AM
-gimme solutions for each point
-11:18 AM
-
-Worked for 1m 30s
-Yep. Solution set per point:
-
-Rumik “reconnecting”
-This is mostly okay behavior. Keep auto-reconnect, but stop surfacing it like a call problem unless TTS actually fails.
-Better fix: before sending TTS, proactively reconnect if socket has been idle too long, say idle_age_s > 45s or connection age is near the server close window. That avoids the mid-sentence reconnect blip.
+solutions
 
 KYC/payment prerecorded filler didn’t fire
 Fix deterministic routing first. Add exact Hindi/STT variants from the logs:

@@ -4,7 +4,10 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
+
+from pipecat.frames.frames import TranscriptionFrame
 
 from app.agent.intent_classifier_ai import resolve_stable_turn_route_ai
 from app.db.pool import acquire
@@ -26,6 +29,13 @@ logger = logging.getLogger(__name__)
 
 VoiceLogEvent = Callable[[str], None]
 StructuredLogEvent = Callable[..., None]
+
+
+@dataclass
+class ClassifiedTranscriptionFrame(TranscriptionFrame):
+    route: dict[str, Any] = field(default_factory=dict)
+    route_source: str = "unknown"
+
 
 ARGLESS_MODEL_TOOLS = {
     "lookup_customer_profile",
@@ -106,6 +116,60 @@ async def resolve_voice_route(context: CallContext, transcript: str) -> tuple[di
     if deterministic["intent"] != "unknown":
         return deterministic, "keyword"
     return await resolve_stable_turn_route_ai(transcript, context.history), "classifier"
+
+
+def create_intent_classifier_processor(
+    context: CallContext,
+    *,
+    log_event: StructuredLogEvent,
+):
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+    class IntentClassifierProcessor(FrameProcessor):
+        def can_generate_metrics(self) -> bool:
+            return True
+
+        async def process_frame(self, frame: Any, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if not isinstance(frame, TranscriptionFrame) or isinstance(frame, ClassifiedTranscriptionFrame):
+                await self.push_frame(frame, direction)
+                return
+            transcript = frame.text.strip()
+            if not transcript:
+                await self.push_frame(frame, direction)
+                return
+
+            await self.start_processing_metrics()
+            try:
+                route, route_source = await resolve_voice_route(context, transcript)
+            finally:
+                await self.stop_processing_metrics()
+
+            log_event(
+                "voice_intent_classified",
+                session_id=context.session_id,
+                call_id=context.call_id,
+                transcript=transcript,
+                route=_route_log_payload(route),
+                route_source=route_source,
+            )
+            classified = ClassifiedTranscriptionFrame(
+                frame.text,
+                frame.user_id,
+                frame.timestamp,
+                language=frame.language,
+                result=frame.result,
+                finalized=frame.finalized,
+                route=route,
+                route_source=route_source,
+            )
+            classified.metadata.update(frame.metadata)
+            classified.pts = frame.pts
+            classified.transport_source = frame.transport_source
+            classified.transport_destination = frame.transport_destination
+            await self.push_frame(classified, direction)
+
+    return IntentClassifierProcessor(name="stable_intent_classifier")
 
 
 def _recent_model_asked_for_mobile_last_four(history: list[dict[str, str]]) -> bool:
@@ -433,7 +497,10 @@ def create_stable_turn_context_processor(
                         route_source="verification",
                     )
                     start_filler_audio("unknown")
-            route, route_source = await resolve_voice_route(context, transcript)
+            if isinstance(frame, ClassifiedTranscriptionFrame):
+                route, route_source = frame.route, frame.route_source
+            else:
+                route, route_source = await resolve_voice_route(context, transcript)
             if start_filler_audio and filler_intent == "unknown":
                 resolved_filler_intent = str(route.get("intent") or "unknown")
                 if resolved_filler_intent == "unknown":
