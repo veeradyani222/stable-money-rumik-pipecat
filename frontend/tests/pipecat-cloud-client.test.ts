@@ -33,9 +33,15 @@ test('voice pipeline client sends WebRTC signaling to the cloud session endpoint
 });
 
 test('voice pipeline client treats missing Pipecat Cloud env as backend fallback', () => {
-  assert.match(pipelineSource, /function readOptionalEnv\(name: string\): string \| null/);
+  assert.match(pipelineSource, /function normalizeOptionalEnv\(value: string \| undefined\): string \| null/);
   assert.match(pipelineSource, /if \(!agentName \|\| !publicApiKey\) return null;/);
   assert.match(pipelineSource, /if \(\['undefined', 'null'\]\.includes\(normalized\)\) return null;/);
   assert.match(pipelineSource, /const iceServers = cloudSession\?\.iceServers \?\? await this\.loadLocalIceServers\(\);/);
   assert.match(pipelineSource, /fetch\(apiUrl\('\/api\/turn-config'\), API_FETCH_OPTIONS\)/);
+});
+
+test('voice pipeline client reads public Pipecat env with static Next.js access', () => {
+  assert.match(pipelineSource, /process\.env\.NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME/);
+  assert.match(pipelineSource, /process\.env\.NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY/);
+  assert.doesNotMatch(pipelineSource, /process\.env\[name\]/);
 });

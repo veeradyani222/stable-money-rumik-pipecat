@@ -28,18 +28,18 @@ interface PipecatCloudSession {
   iceServers: RTCIceServer[];
 }
 
-function readOptionalEnv(name: string): string | null {
-  const value = process.env[name]?.trim();
-  if (!value) return null;
-  const normalized = value.toLowerCase();
+function normalizeOptionalEnv(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.toLowerCase();
   if (['undefined', 'null'].includes(normalized)) return null;
-  return value;
+  return trimmed;
 }
 
 function getPipecatCloudConfig(): PipecatCloudConfig | null {
-  const agentName = readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME');
-  const publicApiKey = readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY');
-  const apiBaseUrl = (readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_API_BASE_URL') || 'https://api.pipecat.daily.co/v1/public')
+  const agentName = normalizeOptionalEnv(process.env.NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME);
+  const publicApiKey = normalizeOptionalEnv(process.env.NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY);
+  const apiBaseUrl = (normalizeOptionalEnv(process.env.NEXT_PUBLIC_PIPECAT_CLOUD_API_BASE_URL) || 'https://api.pipecat.daily.co/v1/public')
     .replace(/\/+$/, '');
 
   if (!agentName || !publicApiKey) return null;
