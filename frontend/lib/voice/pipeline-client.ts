@@ -28,10 +28,18 @@ interface PipecatCloudSession {
   iceServers: RTCIceServer[];
 }
 
+function readOptionalEnv(name: string): string | null {
+  const value = process.env[name]?.trim();
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+  if (['undefined', 'null'].includes(normalized)) return null;
+  return value;
+}
+
 function getPipecatCloudConfig(): PipecatCloudConfig | null {
-  const agentName = process.env.NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME?.trim();
-  const publicApiKey = process.env.NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY?.trim();
-  const apiBaseUrl = (process.env.NEXT_PUBLIC_PIPECAT_CLOUD_API_BASE_URL || 'https://api.pipecat.daily.co/v1/public')
+  const agentName = readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_AGENT_NAME');
+  const publicApiKey = readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_PUBLIC_API_KEY');
+  const apiBaseUrl = (readOptionalEnv('NEXT_PUBLIC_PIPECAT_CLOUD_API_BASE_URL') || 'https://api.pipecat.daily.co/v1/public')
     .replace(/\/+$/, '');
 
   if (!agentName || !publicApiKey) return null;
@@ -46,8 +54,8 @@ export class VoicePipelineClient {
   private pcId: string | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private stopped = false;
-  private offerUrl = apiUrl('/offer');
-  private patchOfferUrl = apiUrl('/offer');
+  private offerUrl = apiUrl('/api/offer');
+  private patchOfferUrl = apiUrl('/api/offer');
   private signalingHeaders: HeadersInit = { 'Content-Type': 'application/json' };
   private signalingFetchOptions: RequestCredentials = 'include';
   private readonly startedAt = performance.now();
@@ -250,7 +258,7 @@ export class VoicePipelineClient {
   }
 
   private async loadLocalIceServers(): Promise<RTCIceServer[]> {
-    const turnConfigResponse = await fetch(apiUrl('/turn-config'), API_FETCH_OPTIONS);
+    const turnConfigResponse = await fetch(apiUrl('/api/turn-config'), API_FETCH_OPTIONS);
     if (!turnConfigResponse.ok) throw new Error('Could not load voice transport config');
     this.diagnostic('setup:turn_config_ready');
     return await turnConfigResponse.json() as RTCIceServer[];

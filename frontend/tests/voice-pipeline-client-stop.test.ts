@@ -13,7 +13,7 @@ test('voice pipeline client stops in-flight connection setup before it can recon
   assert.match(pipelineSource, /private ensureActive\(\): void/);
   assert.match(pipelineSource, /if \(this\.stopped\) throw new Error\('Voice pipeline stopped'\);/);
   assert.match(pipelineSource, /private async loadLocalIceServers\(\): Promise<RTCIceServer\[]>/);
-  assert.match(pipelineSource, /fetch\(apiUrl\('\/turn-config'\), API_FETCH_OPTIONS\)/);
+  assert.match(pipelineSource, /fetch\(apiUrl\('\/api\/turn-config'\), API_FETCH_OPTIONS\)/);
   assert.match(pipelineSource, /const localStreamPromise = navigator\.mediaDevices\.getUserMedia/);
   assert.match(pipelineSource, /await Promise\.all\(\[cloudSessionPromise, localStreamPromise\]\)/);
   assert.doesNotMatch(pipelineSource, /waitForIceGathering/);
@@ -25,7 +25,7 @@ test('voice pipeline client stops in-flight connection setup before it can recon
 test('voice pipeline client trickles queued ICE candidates after offer returns pc id', () => {
   assert.match(pipelineSource, /private pcId: string \| null = null;/);
   assert.match(pipelineSource, /private pendingIceCandidates: RTCIceCandidateInit\[\] = \[\];/);
-  assert.match(pipelineSource, /private patchOfferUrl = apiUrl\('\/offer'\);/);
+  assert.match(pipelineSource, /private patchOfferUrl = apiUrl\('\/api\/offer'\);/);
   assert.match(pipelineSource, /peer\.onicecandidate = \(event\) => \{/);
   assert.match(pipelineSource, /this\.queueOrPatchIceCandidate\(event\.candidate\.toJSON\(\)\)/);
   assert.match(pipelineSource, /sdp_mid: candidate\.sdpMid/);

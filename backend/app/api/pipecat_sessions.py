@@ -47,6 +47,7 @@ small_webrtc_handler = SmallWebRTCRequestHandler(ice_servers=_ice_servers())
 
 
 @router.get("/turn-config")
+@router.get("/api/turn-config")
 async def turn_config():
     return _ice_server_dicts()
 

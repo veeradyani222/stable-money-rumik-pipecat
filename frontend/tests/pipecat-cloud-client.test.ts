@@ -19,8 +19,8 @@ test('voice pipeline client can start a Pipecat Cloud session before creating th
 });
 
 test('voice pipeline client sends WebRTC signaling to the cloud session endpoint when configured', () => {
-  assert.match(pipelineSource, /private offerUrl = apiUrl\('\/offer'\);/);
-  assert.match(pipelineSource, /private patchOfferUrl = apiUrl\('\/offer'\);/);
+  assert.match(pipelineSource, /private offerUrl = apiUrl\('\/api\/offer'\);/);
+  assert.match(pipelineSource, /private patchOfferUrl = apiUrl\('\/api\/offer'\);/);
   assert.match(pipelineSource, /this\.offerUrl = cloudSession\.offerUrl;/);
   assert.match(pipelineSource, /this\.patchOfferUrl = cloudSession\.offerUrl;/);
   assert.match(pipelineSource, /private signalingHeaders: HeadersInit = \{ 'Content-Type': 'application\/json' \};/);
@@ -30,4 +30,12 @@ test('voice pipeline client sends WebRTC signaling to the cloud session endpoint
   assert.match(pipelineSource, /headers: this\.signalingHeaders/);
   assert.match(pipelineSource, /fetch\(this\.offerUrl/);
   assert.match(pipelineSource, /fetch\(this\.patchOfferUrl/);
+});
+
+test('voice pipeline client treats missing Pipecat Cloud env as backend fallback', () => {
+  assert.match(pipelineSource, /function readOptionalEnv\(name: string\): string \| null/);
+  assert.match(pipelineSource, /if \(!agentName \|\| !publicApiKey\) return null;/);
+  assert.match(pipelineSource, /if \(\['undefined', 'null'\]\.includes\(normalized\)\) return null;/);
+  assert.match(pipelineSource, /const iceServers = cloudSession\?\.iceServers \?\? await this\.loadLocalIceServers\(\);/);
+  assert.match(pipelineSource, /fetch\(apiUrl\('\/api\/turn-config'\), API_FETCH_OPTIONS\)/);
 });
